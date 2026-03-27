@@ -50,7 +50,10 @@ async function fetchOnce(): Promise<GpuVisibility> {
       cached = result;
       return result;
     })
-    .catch(() => EMPTY);
+    .catch(() => {
+      fetchPromise = null;
+      return EMPTY;
+    });
 
   return fetchPromise;
 }
@@ -59,6 +62,7 @@ export function useGpuVisibility(): GpuVisibility {
   const [info, setInfo] = useState<GpuVisibility>(cached ?? EMPTY);
 
   useEffect(() => {
+    if (cached) return;
     let cancelled = false;
     fetchOnce().then((result) => {
       if (!cancelled) setInfo(result);
