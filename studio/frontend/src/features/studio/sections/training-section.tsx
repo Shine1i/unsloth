@@ -158,6 +158,7 @@ export function TrainingSection() {
           selectedGpuIds={store.gpuIds}
           onAutoChange={store.setGpuAuto}
           onGpuToggle={store.toggleGpuId}
+          onGpuIdsChange={store.setGpuIds}
         />
 
         {/* Start/Stop */}

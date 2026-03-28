@@ -559,7 +559,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
             const next = current.includes(id)
               ? current.filter((g) => g !== id)
               : [...current, id];
-            if (next.length === 0) return {};
+            if (next.length === 0) return state;
             return { gpuIds: next };
           }),
         canProceed: () => canProceedForStep(get()),

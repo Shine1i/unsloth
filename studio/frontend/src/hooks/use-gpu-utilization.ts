@@ -4,8 +4,7 @@
 import { useEffect, useState } from "react";
 import { authFetch } from "@/features/auth";
 
-export interface GpuDeviceMetrics {
-  index: number;
+export interface GpuUtilization {
   gpu_utilization_pct: number | null;
   temperature_c: number | null;
   vram_used_gb: number | null;
@@ -16,15 +15,8 @@ export interface GpuDeviceMetrics {
   power_utilization_pct: number | null;
 }
 
-export interface GpuUtilization {
-  gpu_utilization_pct: number | null;
-  temperature_c: number | null;
-  vram_used_gb: number | null;
-  vram_total_gb: number | null;
-  vram_utilization_pct: number | null;
-  power_draw_w: number | null;
-  power_limit_w: number | null;
-  power_utilization_pct: number | null;
+export interface GpuDeviceMetrics extends GpuUtilization {
+  index: number;
 }
 
 const DEFAULT: GpuUtilization = {
@@ -37,8 +29,6 @@ const DEFAULT: GpuUtilization = {
   power_limit_w: null,
   power_utilization_pct: null,
 };
-
-const DEFAULT_DEVICE: GpuDeviceMetrics = { index: 0, ...DEFAULT };
 
 export interface GpuUtilizationResult {
   /** Aggregate metrics (backwards-compatible with single-GPU consumers). */

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
 import { useEffect } from "react";
 import { Switch } from "@/components/ui/switch";
 import { useGpuVisibility } from "@/hooks/use-gpu-visibility";
@@ -8,6 +11,7 @@ interface GpuSelectorProps {
   selectedGpuIds: number[];
   onAutoChange: (auto: boolean) => void;
   onGpuToggle: (gpuIndex: number) => void;
+  onGpuIdsChange: (ids: number[]) => void;
 }
 
 export function GpuSelector({
@@ -15,12 +19,13 @@ export function GpuSelector({
   selectedGpuIds,
   onAutoChange,
   onGpuToggle,
+  onGpuIdsChange,
 }: GpuSelectorProps) {
   const { devices, parentVisibleGpuIds, isMultiGpu } = useGpuVisibility();
 
-  // Reconcile stale selections when GPU visibility changes
+  // If GPUs disappear between navigations, drop stale IDs or flip back to auto
   useEffect(() => {
-    if (gpuAuto || !isMultiGpu) return;
+    if (gpuAuto || !isMultiGpu || selectedGpuIds.length === 0) return;
     const valid = selectedGpuIds.filter((id) =>
       parentVisibleGpuIds.includes(id),
     );
@@ -29,13 +34,9 @@ export function GpuSelector({
       return;
     }
     if (valid.length !== selectedGpuIds.length) {
-      for (const id of selectedGpuIds) {
-        if (!parentVisibleGpuIds.includes(id)) {
-          onGpuToggle(id);
-        }
-      }
+      onGpuIdsChange(valid);
     }
-  }, [gpuAuto, isMultiGpu, selectedGpuIds, parentVisibleGpuIds, onAutoChange, onGpuToggle]);
+  }, [gpuAuto, isMultiGpu, selectedGpuIds, parentVisibleGpuIds, onAutoChange, onGpuIdsChange]);
 
   if (!isMultiGpu) return null;
 
@@ -44,7 +45,12 @@ export function GpuSelector({
       <label className="flex items-center gap-1.5">
         <Switch
           checked={gpuAuto}
-          onCheckedChange={onAutoChange}
+          onCheckedChange={(auto) => {
+            if (!auto && selectedGpuIds.length === 0) {
+              onGpuIdsChange(parentVisibleGpuIds);
+            }
+            onAutoChange(auto);
+          }}
           className="scale-75 origin-left"
         />
         <span className="text-[11px] text-muted-foreground">Auto</span>
@@ -63,7 +69,7 @@ export function GpuSelector({
                 gpuAuto
                   ? "opacity-40 pointer-events-none ring-foreground/10 text-muted-foreground"
                   : selected
-                    ? "bg-foreground/10 text-foreground ring-foreground/15"
+                    ? "bg-emerald-500/15 text-emerald-600 ring-emerald-500/25 dark:text-emerald-400"
                     : "bg-transparent text-muted-foreground ring-foreground/10 hover:bg-foreground/5",
               )}
             >
