@@ -110,7 +110,7 @@ def _stdout_supports_color() -> bool:
     try:
         if not sys.stdout.isatty():
             return False
-    except Exception:
+    except (AttributeError, OSError, ValueError):
         return False
     if IS_WINDOWS:
         try:
@@ -121,7 +121,7 @@ def _stdout_supports_color() -> bool:
             mode = ctypes.c_ulong()
             kernel32.GetConsoleMode(handle, ctypes.byref(mode))
             kernel32.SetConsoleMode(handle, mode.value | 0x0004)
-        except Exception:
+        except (ImportError, AttributeError, OSError):
             return False
     return True
 
@@ -460,15 +460,27 @@ def install_python_stack() -> int:
 
     # 3. Core packages: unsloth-zoo + unsloth (or custom package name)
     if skip_base:
-        print(_green(f"✅ {package_name} already installed — skipping base packages"))
+        pass
     elif NO_TORCH:
-        # No-torch mode: unsloth + unsloth-zoo are already installed with
-        # --no-deps by install.sh/install.ps1. Install the runtime deps
-        # (safetensors, transformers, datasets, etc.) from no-torch-runtime.txt.
+        # No-torch update path: install unsloth + unsloth-zoo with --no-deps
+        # (current PyPI metadata still declares torch as a hard dep), then
+        # runtime deps with --no-deps (avoids transitive torch).
         _progress("base packages (no torch)")
+        pip_install(
+            f"Updating {package_name} + unsloth-zoo (no-torch mode)",
+            "--no-cache-dir",
+            "--no-deps",
+            "--upgrade-package",
+            package_name,
+            "--upgrade-package",
+            "unsloth-zoo",
+            package_name,
+            "unsloth-zoo",
+        )
         pip_install(
             "Installing no-torch runtime deps",
             "--no-cache-dir",
+            "--no-deps",
             req = REQ_ROOT / "no-torch-runtime.txt",
         )
         if local_repo:
