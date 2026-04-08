@@ -42,7 +42,7 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "targets": ["appimage", "deb", "rpm", "dmg", "nsis"],
+    "targets": ["appimage", "deb", "dmg", "nsis"],
     "resources": {
       "../../install.sh": "install.sh",
       "../../install.ps1": "install.ps1",
