@@ -8,7 +8,6 @@ import { AnimatePresence, motion } from "motion/react";
 interface UpdateBannerProps {
   status: UpdateStatus;
   info: UpdateInfo | null;
-  progress: number;
   dismissed: boolean;
   isExternalServer?: boolean;
   onInstall: () => void;
@@ -20,7 +19,6 @@ const EASE_OUT_QUART: [number, number, number, number] = [0.165, 0.84, 0.44, 1];
 export function UpdateBanner({
   status,
   info,
-  progress,
   dismissed,
   isExternalServer = false,
   onInstall,
