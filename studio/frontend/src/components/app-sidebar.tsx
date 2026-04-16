@@ -39,6 +39,7 @@ import {
   MessageSearch01Icon,
   Search01Icon,
   NewReleasesIcon,
+  PowerIcon,
   PackageIcon,
   PencilEdit02Icon,
   Settings02Icon,
@@ -66,6 +67,8 @@ import { ChatSearchDialog } from "@/features/chat/components/chat-search-dialog"
 import { useTrainingHistorySidebarItems, deleteTrainingRun } from "@/features/training";
 import type { TrainingRunSummary } from "@/features/training";
 import { useState } from "react";
+import { ShutdownDialog } from "@/components/shutdown-dialog";
+import { removeTrainingUnloadGuard } from "@/features/training/hooks/use-training-unload-guard";
 
 function getTourId(pathname: string): string | null {
   if (pathname.startsWith("/studio")) return "studio";
@@ -165,6 +168,7 @@ export function AppSidebar() {
 
   const isTrainingRunning = useTrainingRuntimeStore((s) => s.isTrainingRunning);
   const chatOnly = usePlatformStore((s) => s.isChatOnly());
+  const [shutdownOpen, setShutdownOpen] = useState(false);
 
   // Chat collapsible state — open by default, syncs with route
   const isChatRoute = pathname.startsWith("/chat");
@@ -510,7 +514,7 @@ export function AppSidebar() {
               <DropdownMenuContent
                 side="top"
                 align="start"
-                className="w-56"
+                className="w-[15rem]"
               >
                 <DropdownMenuGroup>
                   <DropdownMenuItem
@@ -571,20 +575,27 @@ export function AppSidebar() {
                       <span>What's New</span>
                     </a>
                   </DropdownMenuItem>
+                  <DropdownMenuItem asChild>
+                    <a
+                      href="https://github.com/unslothai/unsloth/issues"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <HugeiconsIcon
+                        icon={MessageSearch01Icon}
+                        className="size-4"
+                      />
+                      <span>Feedback</span>
+                    </a>
+                  </DropdownMenuItem>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
-                  <a
-                    href="https://github.com/unslothai/unsloth/issues"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <HugeiconsIcon
-                      icon={MessageSearch01Icon}
-                      className="size-4"
-                    />
-                    <span>Feedback</span>
-                  </a>
+                <DropdownMenuItem onSelect={() => setShutdownOpen(true)}>
+                  <HugeiconsIcon
+                    icon={PowerIcon}
+                    className="size-4"
+                  />
+                  <span>Shutdown Studio</span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -593,6 +604,11 @@ export function AppSidebar() {
       </SidebarFooter>
     </Sidebar>
     <ChatSearchDialog />
+    <ShutdownDialog
+      open={shutdownOpen}
+      onOpenChange={setShutdownOpen}
+      onAfterShutdown={removeTrainingUnloadGuard}
+    />
     </>
   );
 }
