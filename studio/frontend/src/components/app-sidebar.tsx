@@ -42,8 +42,6 @@ import {
   PackageIcon,
   PencilEdit02Icon,
   Settings02Icon,
-  SidebarLeft01Icon,
-  SidebarRight01Icon,
   ZapIcon,
 } from "@hugeicons/core-free-icons";
 import {
@@ -67,7 +65,7 @@ import { useChatSearchStore } from "@/features/chat/stores/chat-search-store";
 import { ChatSearchDialog } from "@/features/chat/components/chat-search-dialog";
 import { useTrainingHistorySidebarItems, deleteTrainingRun } from "@/features/training";
 import type { TrainingRunSummary } from "@/features/training";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 function getTourId(pathname: string): string | null {
   if (pathname.startsWith("/studio")) return "studio";
@@ -157,7 +155,7 @@ export function AppSidebar() {
       search: s.location.search as Record<string, string | undefined>,
     }),
   });
-  const { togglePinned, isMobile, setOpenMobile, state: sidebarState } = useSidebar();
+  const { togglePinned, isMobile, setOpenMobile } = useSidebar();
   const navigate = useNavigate();
 
   // Auto-close mobile Sheet after navigation
@@ -173,30 +171,10 @@ export function AppSidebar() {
   const isStudioRoute = pathname === "/studio" || pathname.startsWith("/studio/");
   const [chatOpen, setChatOpen] = useState(true);
   const [runsOpen, setRunsOpen] = useState(true);
-  const [navOpen, setNavOpen] = useState<boolean>(() => {
-    if (typeof window === "undefined") return true;
-    const stored = window.localStorage.getItem("unsloth_sidebar_navigate_open");
-    return stored === null ? true : stored === "true";
-  });
+  const effectiveChatOpen = isChatRoute || chatOpen;
+  const effectiveRunsOpen = isStudioRoute || runsOpen;
 
   const isRecipesRoute = pathname.startsWith("/data-recipes");
-
-  useEffect(() => {
-    if (isChatRoute) setChatOpen(true);
-  }, [isChatRoute]);
-
-  useEffect(() => {
-    if (isStudioRoute) setRunsOpen(true);
-  }, [isStudioRoute]);
-
-  const handleNavOpenChange = (open: boolean) => {
-    setNavOpen(open);
-    try {
-      window.localStorage.setItem("unsloth_sidebar_navigate_open", String(open));
-    } catch {
-      // ignore
-    }
-  };
 
   const { items: chatItems } = useChatSidebarItems();
   const storeThreadId = useChatRuntimeStore((s) => s.activeThreadId);
@@ -209,7 +187,9 @@ export function AppSidebar() {
     : undefined;
 
   // Training runs
-  const { items: runItems, refresh: refreshRuns } = useTrainingHistorySidebarItems(!chatOnly);
+  const { items: runItems, refresh: refreshRuns } = useTrainingHistorySidebarItems(
+    !chatOnly && isStudioRoute,
+  );
   const activeJobId = useTrainingRuntimeStore((s) => s.jobId);
   const selectedHistoryRunId = useTrainingRuntimeStore((s) => s.selectedHistoryRunId);
   const setSelectedHistoryRunId = useTrainingRuntimeStore((s) => s.setSelectedHistoryRunId);
@@ -232,7 +212,7 @@ export function AppSidebar() {
         {/* Expanded: compact logo + close toggle */}
         <div className="flex items-center justify-between gap-2 group-data-[collapsible=icon]:hidden">
           <Link
-            to={chatOnly ? "/chat" : "/studio"}
+            to="/chat"
             onClick={closeMobileIfOpen}
             className="flex items-center select-none"
             aria-label="Unsloth home"
@@ -378,7 +358,7 @@ export function AppSidebar() {
 
         {/* Recent Chats */}
         {!isStudioRoute && chatItems.length > 0 && (
-          <Collapsible open={chatOpen} onOpenChange={setChatOpen} asChild>
+          <Collapsible open={effectiveChatOpen} onOpenChange={setChatOpen} asChild>
           <SidebarGroup className="group-data-[collapsible=icon]:hidden overflow-hidden px-3 py-0">
             <SidebarGroupLabel className="pt-3.5 pb-1.5 pl-3 pr-2" asChild>
               <CollapsibleTrigger className="cursor-pointer flex w-full items-center justify-between">
@@ -429,7 +409,7 @@ export function AppSidebar() {
 
         {/* Recent Runs */}
         {isStudioRoute && runItems.length > 0 && !chatOnly && (
-          <Collapsible open={runsOpen} onOpenChange={setRunsOpen} asChild>
+          <Collapsible open={effectiveRunsOpen} onOpenChange={setRunsOpen} asChild>
           <SidebarGroup className="group-data-[collapsible=icon]:hidden overflow-hidden px-3 py-0">
             <SidebarGroupLabel className="pt-3.5 pb-1.5 pl-3 pr-2" asChild>
               <CollapsibleTrigger className="cursor-pointer flex w-full items-center justify-between">
