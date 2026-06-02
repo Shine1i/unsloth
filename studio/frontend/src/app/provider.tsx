@@ -31,25 +31,11 @@ const MIN_WINDOW_HEIGHT = 600;
 
 async function showSetupWindow(isCurrent: WindowLayoutGuard): Promise<void> {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
-  const { invoke } = await import("@tauri-apps/api/core");
-  const { restoreStateCurrent, StateFlags } = await import("@tauri-apps/plugin-window-state");
   if (!isCurrent()) return;
 
   const win = getCurrentWindow();
-  const hasSavedState = await invoke<boolean>("has_saved_window_state");
   if (!isCurrent()) return;
-
-  if (hasSavedState) {
-    await win.setResizable(true);
-    if (!isCurrent()) return;
-    await win.setSizeConstraints({ minWidth: MIN_WINDOW_WIDTH, minHeight: MIN_WINDOW_HEIGHT });
-    if (!isCurrent()) return;
-    await restoreStateCurrent(
-      StateFlags.SIZE | StateFlags.POSITION | StateFlags.MAXIMIZED,
-    );
-  } else {
-    await win.center();
-  }
+  await win.center();
   if (!isCurrent()) return;
   await win.show();
 }
@@ -71,9 +57,6 @@ async function applyAppWindowLayout(isCurrent: WindowLayoutGuard): Promise<void>
   if (!isCurrent()) return;
 
   await win.setResizable(true);
-  if (!isCurrent()) return;
-  // Floor before restore: clamps a stale/undersized saved size up to the min.
-  await win.setSizeConstraints({ minWidth: MIN_WINDOW_WIDTH, minHeight: MIN_WINDOW_HEIGHT });
   if (!isCurrent()) return;
 
   if (hasSavedState) {
@@ -103,6 +86,10 @@ async function applyAppWindowLayout(isCurrent: WindowLayoutGuard): Promise<void>
   }
   if (!isCurrent()) return;
   await win.show();
+  if (!isCurrent()) return;
+  // Apply constraints after restore/show. Setting constraints before plugin restore
+  // can emit a Resized event and overwrite the plugin's cached saved size.
+  await win.setSizeConstraints({ minWidth: MIN_WINDOW_WIDTH, minHeight: MIN_WINDOW_HEIGHT });
 }
 
 async function showWindowFallback(): Promise<void> {
