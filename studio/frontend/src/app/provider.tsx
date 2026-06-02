@@ -31,11 +31,25 @@ const MIN_WINDOW_HEIGHT = 600;
 
 async function showSetupWindow(isCurrent: WindowLayoutGuard): Promise<void> {
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  const { invoke } = await import("@tauri-apps/api/core");
+  const { restoreStateCurrent, StateFlags } = await import("@tauri-apps/plugin-window-state");
   if (!isCurrent()) return;
 
   const win = getCurrentWindow();
+  const hasSavedState = await invoke<boolean>("has_saved_window_state");
   if (!isCurrent()) return;
-  await win.center();
+
+  if (hasSavedState) {
+    await win.setResizable(true);
+    if (!isCurrent()) return;
+    await win.setSizeConstraints({ minWidth: MIN_WINDOW_WIDTH, minHeight: MIN_WINDOW_HEIGHT });
+    if (!isCurrent()) return;
+    await restoreStateCurrent(
+      StateFlags.SIZE | StateFlags.POSITION | StateFlags.MAXIMIZED,
+    );
+  } else {
+    await win.center();
+  }
   if (!isCurrent()) return;
   await win.show();
 }
