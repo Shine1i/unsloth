@@ -85,6 +85,7 @@ const initialState: TrainingConfigState = {
   isCheckingDataset: false,
   isDatasetImage: null,
   isDatasetAudio: false,
+  modelRequiresTrustRemoteCode: false,
   maxPositionEmbeddings: null,
   ...DEFAULT_HYPERPARAMS,
 };
@@ -123,6 +124,8 @@ const NON_PERSISTED_STATE_KEYS: ReadonlySet<keyof TrainingConfigState> = new Set
   "isCheckingDataset",
   "isDatasetImage",
   "isDatasetAudio",
+  "modelRequiresTrustRemoteCode",
+  "trustRemoteCode",
   "trainOnCompletions",
   "maxPositionEmbeddings",
   "s3Config",
@@ -304,6 +307,8 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
             _learningRateManuallySet = false;
             _yamlLearningRate = undefined;
             const patch = mapBackendModelConfigToTrainingPatch(modelDetails.config);
+            const modelRequiresTrustRemoteCode =
+              modelDetails.config?.training?.trust_remote_code === true;
 
             // Treat a model-config LR as authoritative so async auto-select
             // won't overwrite it.
@@ -367,6 +372,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
               isVisionModel: modelDetails.is_vision,
               isEmbeddingModel: isEmbedding,
               isAudioModel: isAudio,
+              modelRequiresTrustRemoteCode,
               isLoadingModelDefaults: false,
               isCheckingVision: false,
               modelDefaultsError: null,
@@ -382,6 +388,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
               isLoadingModelDefaults: false,
               isEmbeddingModel: false,
               isAudioModel: false,
+              modelRequiresTrustRemoteCode: false,
               modelDefaultsError:
                 error instanceof Error
                   ? error.message
@@ -488,6 +495,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
             isVisionModel: false,
             isEmbeddingModel: false,
             isAudioModel: false,
+            modelRequiresTrustRemoteCode: false,
             isDatasetAudio: false,
             isLoadingModelDefaults: false,
             modelDefaultsError: null,
@@ -498,12 +506,20 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
           const previousModel = get().selectedModel;
           // Reset vision_image_size on a true switch only; same-model reloads
           // go through the mapper, which preserves the user's choice.
-          const patch: { selectedModel: string | null; modelDefaultsError: null; visionImageSize?: number | null } = {
+          const patch: {
+            selectedModel: string | null;
+            modelDefaultsError: null;
+            visionImageSize?: number | null;
+            trustRemoteCode?: boolean;
+            modelRequiresTrustRemoteCode?: boolean;
+          } = {
             selectedModel,
             modelDefaultsError: null,
           };
           if (selectedModel !== previousModel) {
             patch.visionImageSize = DEFAULT_HYPERPARAMS.visionImageSize;
+            patch.trustRemoteCode = false;
+            patch.modelRequiresTrustRemoteCode = false;
           }
           set(patch);
 
@@ -515,6 +531,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
               isVisionModel: false,
               isEmbeddingModel: false,
               isAudioModel: false,
+              modelRequiresTrustRemoteCode: false,
               isDatasetAudio: false,
               isLoadingModelDefaults: false,
               modelDefaultsError: null,
@@ -763,6 +780,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
         setFinetuneMLPModules: (finetuneMLPModules) =>
           set({ finetuneMLPModules }),
         setTargetModules: (targetModules) => set({ targetModules }),
+        setTrustRemoteCode: (trustRemoteCode) => set({ trustRemoteCode }),
         setS3Config: (s3Config) => set({ s3Config }),
         canProceed: () => canProceedForStep(get()),
         reset: () => {
@@ -783,18 +801,30 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
         },
         applyConfigPatch: (config: BackendModelConfig) => {
           const patch = mapBackendModelConfigToTrainingPatch(config);
+          const hasTrustRemoteCode = Object.hasOwn(
+            config.training ?? {},
+            "trust_remote_code",
+          );
           // Only clear the manual-edit flag when the config provides a LR,
           // so unrelated config patches don't silently disarm the guard.
           if (patch.learningRate !== undefined) {
             _learningRateManuallySet = false;
           }
-          set(patch);
+          set({
+            ...patch,
+            ...(hasTrustRemoteCode
+              ? {
+                  modelRequiresTrustRemoteCode:
+                    config.training?.trust_remote_code === true,
+                }
+              : {}),
+          });
         },
       };
     },
     {
       name: "unsloth_training_config_v1",
-      version: 10,
+      version: 11,
       migrate: (persisted, version) => {
         const s = persisted as Record<string, unknown>;
         if (version < 2 && s.datasetSubset == null && s.datasetConfig != null) {
@@ -840,6 +870,9 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
           if (s.learningRate == null || s.learningRate === LR_DEFAULT_LORA) {
             s.learningRate = LR_DEFAULT_CPT;
           }
+        }
+        if (version < 11) {
+          delete s.trustRemoteCode;
         }
         return s as unknown as TrainingConfigStore;
       },

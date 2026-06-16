@@ -7,6 +7,7 @@ import { toast } from "@/lib/toast";
 import { checkDatasetFormat } from "../api/datasets-api";
 import { emitTrainingRunsChanged } from "../events";
 import { getTrainingRun } from "../api/history-api";
+import { getModelTrustRemoteCodeRequirement } from "../api/models-api";
 import { buildTrainingStartPayload } from "../api/mappers";
 import { resetTraining, startTraining, stopTraining } from "../api/train-api";
 import { isRawTextDatasetFormat } from "../lib/training-methods";
@@ -14,6 +15,7 @@ import { syncTrainingRuntimeFromBackend } from "../lib/sync-runtime";
 import { validateTrainingConfig } from "../lib/validation";
 import { useDatasetPreviewDialogStore } from "../stores/dataset-preview-dialog-store";
 import { useTrainingConfigStore } from "../stores/training-config-store";
+import { useTrainingTrustRemoteCodeDialogStore } from "../stores/training-trust-remote-code-dialog-store";
 import { useTrainingRuntimeStore } from "../stores/training-runtime-store";
 import type { TrainingStartRequest } from "../types/api";
 import type { TrainingConfigState } from "../types/config";
@@ -50,6 +52,17 @@ export function useTrainingActions() {
     const validation = validateTrainingConfig(config);
     if (!validation.ok) {
       runtimeStore.setStartError(validation.message);
+      return false;
+    }
+
+    if (
+      !(await confirmTrustRemoteCodeIfNeeded({
+        modelName: config.selectedModel,
+        requiresTrustRemoteCode: config.modelRequiresTrustRemoteCode,
+        trustRemoteCode: config.trustRemoteCode,
+        onConfirm: () => useTrainingConfigStore.getState().setTrustRemoteCode(true),
+      }))
+    ) {
       return false;
     }
 
@@ -198,6 +211,23 @@ export function useTrainingActions() {
       } as TrainingStartRequest;
 
       runtimeStore.setStartResources(payload.model_name, payload.hf_dataset, true);
+      const savedPayloadTrustsRemoteCode = payload.trust_remote_code === true;
+      const requiresTrustRemoteCode =
+        savedPayloadTrustsRemoteCode ||
+        (await resumePayloadRequiresTrustRemoteCode(payload, config));
+      if (
+        !(await confirmTrustRemoteCodeIfNeeded({
+          modelName: payload.model_name,
+          requiresTrustRemoteCode,
+          trustRemoteCode: false,
+          onConfirm: () => {
+            payload.trust_remote_code = true;
+          },
+        }))
+      ) {
+        runtimeStore.setStarting(false);
+        return false;
+      }
 
       const response = await startTraining(payload);
       if (response.status === "error") {
@@ -245,6 +275,55 @@ export function useTrainingActions() {
     stopTrainingRun,
     dismissTrainingRun,
   };
+}
+
+type TrustRemoteCodeConfirmationRequest = {
+  modelName: string | null;
+  requiresTrustRemoteCode: boolean;
+  trustRemoteCode: boolean;
+  onConfirm: () => void;
+};
+
+async function confirmTrustRemoteCodeIfNeeded({
+  modelName,
+  requiresTrustRemoteCode,
+  trustRemoteCode,
+  onConfirm,
+}: TrustRemoteCodeConfirmationRequest): Promise<boolean> {
+  if (!requiresTrustRemoteCode || trustRemoteCode) {
+    return true;
+  }
+
+  const confirmed =
+    await useTrainingTrustRemoteCodeDialogStore.getState().requestConfirmation(modelName);
+  if (!confirmed) {
+    return false;
+  }
+
+  onConfirm();
+  return true;
+}
+
+async function resumePayloadRequiresTrustRemoteCode(
+  payload: TrainingStartRequest,
+  currentConfig: TrainingConfigState,
+): Promise<boolean> {
+  if (
+    currentConfig.selectedModel === payload.model_name &&
+    currentConfig.modelRequiresTrustRemoteCode
+  ) {
+    return true;
+  }
+
+  try {
+    return await getModelTrustRemoteCodeRequirement(payload.model_name);
+  } catch (error) {
+    const detail =
+      error instanceof Error ? error.message : "Unknown trust_remote_code lookup error";
+    throw new Error(
+      `Could not verify whether ${payload.model_name} requires trust_remote_code before resuming training. ${detail}`,
+    );
+  }
 }
 
 function getDatasetName(config: TrainingConfigState): string | null {
