@@ -1,0 +1,152 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6493 llama.cpp update repro Ubuntu"
+
+on:
+  push:
+    branches:
+      - "pr-6493-llama-update-repro-ci-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Run mocked llama.cpp update probe"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m ensurepip --upgrade || true
+          python -m pip install --upgrade pip
+          python -m pip install structlog
+          python <<'PY'
+          import json
+          import sys
+          import tempfile
+          import time
+          from pathlib import Path
+          from threading import Lock
+          from types import ModuleType
+
+          ROOT = Path.cwd()
+          BACKEND = ROOT / "studio" / "backend"
+          sys.path.insert(0, str(BACKEND))
+
+          import utils.llama_cpp_freshness as freshness
+          import utils.llama_cpp_update as upd
+
+          MARKER = "UNSLOTH_PREBUILT_INFO.json"
+          TARGET_RELEASE = "b9596-mix-e6f2453"
+
+
+          def write_install(dir_, tag, release_tag=None):
+              bin_dir = dir_ / "build" / "bin"
+              bin_dir.mkdir(parents=True, exist_ok=True)
+              binary = bin_dir / ("llama-server.exe" if sys.platform == "win32" else "llama-server")
+              binary.write_text("stub\n", encoding="utf-8")
+              marker = {
+                  "tag": tag,
+                  "release_tag": release_tag or tag,
+                  "published_repo": "unslothai/llama.cpp",
+                  "installed_at_utc": "2020-01-01T00:00:00Z",
+              }
+              (dir_ / MARKER).write_text(json.dumps(marker), encoding="utf-8")
+              return str(binary)
+
+
+          class FakeBackend:
+              def __init__(self, active):
+                  self._serial_load_lock = Lock()
+                  self._llama_update_in_progress = False
+                  self.is_active = active
+                  self.unloaded = False
+
+              def unload_model(self):
+                  self.unloaded = True
+
+
+          def inject_backend(backend):
+              routes_pkg = ModuleType("routes")
+              routes_pkg.__path__ = []
+              inference_mod = ModuleType("routes.inference")
+              inference_mod.get_llama_cpp_backend = lambda: backend
+              sys.modules["routes"] = routes_pkg
+              sys.modules["routes.inference"] = inference_mod
+
+
+          def wait_job():
+              deadline = time.time() + 10
+              while time.time() < deadline:
+                  job = upd.get_update_status()["job"]
+                  if job["state"] in {"success", "error"}:
+                      return job
+                  time.sleep(0.05)
+              raise AssertionError("update job did not finish")
+
+
+          def run_probe(active):
+              freshness.reset_caches(drop_disk=True)
+              upd._reset_job_for_tests()
+              upd._resolve_memo.clear()
+              with tempfile.TemporaryDirectory() as tmp_s:
+                  tmp = Path(tmp_s)
+                  install_dir = tmp / "llama.cpp"
+                  binary = write_install(install_dir, "b9585", "b9585")
+                  script = tmp / "install_llama_prebuilt.py"
+                  script.write_text("# stub installer\n", encoding="utf-8")
+                  backend = FakeBackend(active)
+                  inject_backend(backend)
+
+                  freshness._cache_dir = lambda: tmp / "cache"
+                  freshness._fetch_latest_release_tag = lambda repo, timeout=5.0: TARGET_RELEASE
+                  freshness._fetch_latest_release_assets = lambda repo, timeout=5.0: {}
+                  upd._find_binary = lambda: binary
+                  upd._installer_script = lambda: script
+
+                  def on_start(cmd):
+                      assert "--llama-tag" in cmd, cmd
+                      assert "latest" in cmd, cmd
+                      write_install(install_dir, "b9596", TARGET_RELEASE)
+
+                  class FakePopen:
+                      def __init__(self, cmd, **kwargs):
+                          self.returncode = 0
+                          self.stdout = iter(["Downloading llama.zip:  50.0% (1.0 MiB/2.0 MiB) at 1.0 MiB/s\n"])
+                          on_start(list(cmd))
+
+                      def wait(self):
+                          return self.returncode
+
+                      def kill(self):
+                          pass
+
+                  upd.subprocess.Popen = lambda cmd, **kwargs: FakePopen(cmd, **kwargs)
+                  result = upd.start_update()
+                  assert result["started"] is True, result
+                  job = wait_job()
+                  assert job["state"] == "success", job
+                  assert job["to_tag"] == TARGET_RELEASE, job
+                  assert job.get("reload_required") is active, job
+                  assert backend.unloaded is active, (active, backend.unloaded)
+                  assert backend._llama_update_in_progress is False
+                  return job
+
+
+          idle_job = run_probe(False)
+          active_job = run_probe(True)
+          print("PASS full release_tag propagated", idle_job["to_tag"])
+          print("PASS reload_required follows backend unload", active_job["reload_required"])
+          PY
