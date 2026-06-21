@@ -30,6 +30,57 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Review-fix invariant checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $failures = 0
+          function Check($name, $cond) {
+            if ($cond) {
+              Write-Host "  PASS  $name"
+            } else {
+              Write-Host "  FAIL  $name" -ForegroundColor Red
+              $script:failures++
+            }
+          }
+
+          $setupPs1 = Get-Content -Raw -Path studio/setup.ps1
+          $setupSh = Get-Content -Raw -Path studio/setup.sh
+          $installer = Get-Content -Raw -Path studio/install_node_prebuilt.py
+          $validator = Get-Content -Raw -Path studio/backend/core/data_recipe/local_callable_validators.py
+
+          $nodeSourceOffset = $setupPs1.IndexOf('$NodeSource = Get-NodeDecision')
+          $skipFrontendOffset = $setupPs1.IndexOf('} elseif ($SkipFrontend) {')
+          Check "NodeSource initialized before SKIP_STUDIO_FRONTEND branch" (
+            $nodeSourceOffset -ge 0 -and $skipFrontendOffset -ge 0 -and $nodeSourceOffset -lt $skipFrontendOffset
+          )
+
+          $customHomeErrorOffset = $setupPs1.IndexOf('UNSLOTH_STUDIO_HOME/STUDIO_HOME=$NodeOverride does not exist')
+          $nodeParentMkdirOffset = $setupPs1.IndexOf('New-Item -ItemType Directory -Force -Path $NodeParent')
+          Check "custom Studio home validated before Node parent creation" (
+            $customHomeErrorOffset -ge 0 -and $nodeParentMkdirOffset -ge 0 -and $customHomeErrorOffset -lt $nodeParentMkdirOffset
+          )
+
+          Check "Windows setup pins npm prefix and clears NODE_PATH" (
+            $setupPs1.Contains('$env:NPM_CONFIG_PREFIX = $NodeDir') -and
+            $setupPs1.Contains('Remove-Item Env:NODE_PATH')
+          )
+          Check "Unix setup pins npm prefix and clears NODE_PATH" (
+            $setupSh.Contains('export NPM_CONFIG_PREFIX="$NODE_DIR"') -and
+            $setupSh.Contains('unset NODE_PATH')
+          )
+          Check "runtime OXC child clears NODE_PATH" (
+            $validator.Contains('env.pop("NODE_PATH", None)')
+          )
+          Check "Windows fallback lock avoids os.kill(pid, 0)" (
+            $installer.Contains('def _pid_is_alive') -and
+            -not $installer.Contains('os.kill(int(raw), 0)')
+          )
+
+          if ($failures -gt 0) {
+            throw "$failures review-fix invariant(s) failed"
+          }
+
       - name: Force the reported Node 22 + npm 10 shape
         shell: pwsh
         run: |
