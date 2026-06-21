@@ -1,0 +1,128 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Disposable fork-only repro for unslothai/unsloth#6533.
+
+name: PR 6533 Node Isolation Repro
+
+on:
+  push:
+    branches:
+      - 'pr-6533-node-repro-ci-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-node22-npm10:
+    name: Windows stale npm -> isolated Node
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22.17.1'
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Force the reported Node 22 + npm 10 shape
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "node before: $(node -v)"
+          Write-Host "npm before: $(npm -v)"
+          if (-not ((node -v) -match '^v22\.')) {
+            throw "expected Node 22 for repro, got $(node -v)"
+          }
+          if (-not ((npm -v) -match '^10\.')) {
+            npm install -g npm@10
+          }
+          Write-Host "node repro: $(node -v)"
+          Write-Host "npm repro: $(npm -v)"
+          if (-not ((npm -v) -match '^10\.')) {
+            throw "expected npm 10 for repro, got $(npm -v)"
+          }
+
+      - name: PowerShell decision and probe regressions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pwsh -NoProfile -File tests/studio/test_node_decision.ps1
+          pwsh -NoProfile -File tests/studio/test_node_probe_guard.ps1
+
+      - name: Python managed Node tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --upgrade pip
+          python -m pip install pytest structlog starlette
+          python -m pytest -q tests/studio/install/test_install_node_prebuilt_logic.py tests/studio/install/test_managed_node_runtime.py
+
+      - name: Install isolated Node under stale system npm
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $studioHome = Join-Path $env:RUNNER_TEMP "unsloth-pr6533-home"
+          $nodeDir = Join-Path $studioHome "node"
+          New-Item -ItemType Directory -Force -Path $studioHome | Out-Null
+
+          $env:UNSLOTH_STUDIO_HOME = $studioHome
+          $env:NPM_CONFIG_PREFIX = Join-Path $env:RUNNER_TEMP "stale-prefix"
+          $env:NODE_PATH = Join-Path $env:RUNNER_TEMP "stale-node-path"
+
+          python studio/install_node_prebuilt.py --install-dir $nodeDir
+
+          $nodeExe = Join-Path $nodeDir "node.exe"
+          $npmCmd = Join-Path $nodeDir "npm.cmd"
+          $managedNodeVersion = & $nodeExe -v
+          $managedNpmVersion = & $npmCmd -v
+          Write-Host "managed node: $managedNodeVersion"
+          Write-Host "managed npm: $managedNpmVersion"
+          if (-not ($managedNodeVersion -match '^v24\.')) {
+            throw "expected managed Node 24, got $managedNodeVersion"
+          }
+          if (-not ($managedNpmVersion -match '^11\.')) {
+            throw "expected managed npm 11, got $managedNpmVersion"
+          }
+
+          $env:PATH = "$nodeDir;$env:PATH"
+          $env:NPM_CONFIG_PREFIX = $nodeDir
+          $env:npm_config_prefix = $nodeDir
+          Remove-Item Env:NODE_PATH -ErrorAction SilentlyContinue
+          $prefix = npm prefix -g
+          Write-Host "npm global prefix: $prefix"
+          if ($prefix -ne $nodeDir) {
+            throw "npm global prefix escaped isolated Node: $prefix"
+          }
+
+      - name: OXC validator runs through isolated Node
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $nodeDir = Join-Path (Join-Path $env:RUNNER_TEMP "unsloth-pr6533-home") "node"
+          $env:PATH = "$nodeDir;$env:PATH"
+          $env:NPM_CONFIG_PREFIX = $nodeDir
+          $env:npm_config_prefix = $nodeDir
+          Remove-Item Env:NODE_PATH -ErrorAction SilentlyContinue
+
+          npm install --prefix studio/backend/core/data_recipe/oxc-validator --no-fund --no-audit --loglevel=error
+          $payload = @{
+            lang = "ts"
+            mode = "syntax"
+            code_shape = "auto"
+            codes = @(
+              "export const x: number = 1;",
+              "export const ="
+            )
+          } | ConvertTo-Json -Compress
+          $out = $payload | node studio/backend/core/data_recipe/oxc-validator/validate.mjs
+          Write-Host $out
+          $parsed = $out | ConvertFrom-Json
+          if ($parsed.Count -ne 2) { throw "expected two OXC results" }
+          if ($parsed[0].is_valid -ne $true) { throw "expected first OXC snippet to be valid" }
+          if ($parsed[1].is_valid -ne $false) { throw "expected second OXC snippet to be invalid" }
