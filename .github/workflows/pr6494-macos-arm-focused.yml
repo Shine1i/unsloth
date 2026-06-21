@@ -1,0 +1,152 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6494 macOS ARM Focused Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6494-mlx-prebuilt-repro-ci-20260621132300"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "macos-15"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.11"
+
+      - name: "Install focused test dependencies"
+        shell: bash
+        run: |
+          python -VV
+          python -m pip install --upgrade pip
+          python -m pip install --prefer-binary pytest packaging structlog starlette PyJWT PyYAML fastapi httpx2 matplotlib httpx cryptography diceware typer python-multipart datasets ruff
+
+      - name: "Write MLX repair invariant probe"
+        shell: bash
+        run: |
+          mkdir -p temp
+          cat > temp/pr6494_invariants.py <<'PY'
+          import argparse
+          import os
+          import sys
+          import types
+          from importlib import metadata
+          from unittest.mock import patch
+          
+          sys.path.insert(0, os.path.abspath("studio/backend"))
+          
+          import utils.mlx_repair as mr
+          
+          
+          def _run_checks() -> None:
+              saved = {name: sys.modules.get(name) for name in ("mlx", "mlx.core")}
+              try:
+                  mlx = types.ModuleType("mlx")
+                  core = types.ModuleType("mlx.core")
+                  mlx.core = core
+                  sys.modules["mlx"] = mlx
+                  sys.modules["mlx.core"] = core
+          
+                  runtime_imports = []
+          
+                  def fake_version(name: str) -> str:
+                      if name == "mlx":
+                          return "0.21.0"
+                      return mr._MLX_MIN_VERSIONS[name]
+          
+                  def fake_import_module(name: str):
+                      runtime_imports.append(name)
+                      return object()
+          
+                  with patch.object(metadata, "version", fake_version), patch.object(
+                      mr.importlib, "import_module", fake_import_module
+                  ):
+                      assert mr.mlx_stack_available() is False
+                  assert runtime_imports == [], f"runtime imports before version check: {runtime_imports}"
+              finally:
+                  for name, value in saved.items():
+                      if value is None:
+                          sys.modules.pop(name, None)
+                      else:
+                          sys.modules[name] = value
+          
+              captured = {}
+              events = []
+          
+              class Result:
+                  returncode = 0
+                  stdout = ""
+          
+              def fake_run(cmd, **_kwargs):
+                  captured["cmd"] = cmd
+                  return Result()
+          
+              def stack_ok() -> bool:
+                  events.append("check")
+                  return True
+          
+              with patch.object(mr, "_uv_executable", lambda: "/usr/bin/uv"), patch.object(
+                  mr, "_transformers_constraint_args", lambda: ([], None)
+              ), patch.object(mr.subprocess, "run", fake_run), patch.object(
+                  mr.importlib, "invalidate_caches", lambda: events.append("invalidate")
+              ), patch.object(
+                  mr, "mlx_stack_available", stack_ok
+              ):
+                  assert mr.attempt_mlx_repair() is True
+          
+              cmd = captured["cmd"]
+              pairs = set(zip(cmd, cmd[1:]))
+              for name in mr._MLX_PACKAGE_NAMES:
+                  assert ("--reinstall-package", name) in pairs, cmd
+              assert events == ["invalidate", "check"], events
+          
+          
+          def main() -> None:
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--expect", choices=("pass", "fail"), default="pass")
+              args = parser.parse_args()
+              try:
+                  _run_checks()
+              except Exception as exc:
+                  if args.expect == "fail":
+                      print(f"EXPECTED_FAIL: {type(exc).__name__}: {exc}")
+                      return
+                  raise
+              if args.expect == "fail":
+                  raise SystemExit("negative pre-fix check unexpectedly passed")
+              print("PASS: MLX repair invariants hold")
+          
+          
+          if __name__ == "__main__":
+              main()
+          PY
+
+      - name: "A/B negative proof on pre-fix MLX validation"
+        shell: bash
+        run: |
+          git checkout 39123cab60fefa3216b93210dc029afbbbd5a6f4
+          PYTHONPATH=studio/backend python temp/pr6494_invariants.py --expect fail
+          git checkout "$GITHUB_SHA"
+
+      - name: "Verify fixed MLX validation"
+        shell: bash
+        run: |
+          PYTHONPATH=studio/backend python temp/pr6494_invariants.py --expect pass
+
+      - name: "Run focused compile and tests"
+        shell: bash
+        run: |
+          python -m compileall -q studio/backend/main.py studio/backend/utils/hardware/hardware.py studio/backend/utils/mlx_repair.py studio/backend/utils/models/model_config.py studio/install_llama_prebuilt.py studio/backend/tests/test_chat_only_reason.py studio/backend/tests/test_desktop_auth.py studio/backend/tests/test_install_resolve_prebuilt.py studio/backend/tests/test_mlx_repair.py studio/backend/tests/test_model_defaults_none_guard.py studio/backend/tests/test_startup_llama_probe_non_blocking.py studio/backend/tests/test_utils.py tests/studio/install/test_macos_version_compat.py tests/studio/install/test_selection_logic.py
+          PYTHONPATH=studio/backend:. python -m pytest -q studio/backend/tests/test_mlx_repair.py studio/backend/tests/test_chat_only_reason.py studio/backend/tests/test_install_resolve_prebuilt.py tests/studio/install/test_macos_version_compat.py tests/studio/install/test_selection_logic.py studio/backend/tests/test_desktop_auth.py studio/backend/tests/test_model_defaults_none_guard.py studio/backend/tests/test_startup_llama_probe_non_blocking.py studio/backend/tests/test_utils.py
