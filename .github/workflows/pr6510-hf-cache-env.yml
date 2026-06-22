@@ -140,16 +140,18 @@ jobs:
           temp_root.mkdir(parents=True, exist_ok=True)
           with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
               tmp_path = Path(tmp)
-              base_env = {
-                  "PATH": os.environ.get("PATH", ""),
+              home = tmp_path / "home"
+              home.mkdir()
+              base_env = os.environ.copy()
+              base_env.update({
                   "PYTHONPATH": "",
-                  "HOME": str(tmp_path / "home"),
+                  "HOME": str(home),
+                  "USERPROFILE": str(home),
                   "XDG_CACHE_HOME": str(tmp_path / "xdg-cache"),
                   "UNSLOTH_STUDIO_HOME": str(tmp_path / "studio"),
                   "HF_HOME": str(tmp_path / "custom-hf"),
                   "PR6510_STORAGE_ROOTS": str(storage_roots),
-              }
-              Path(base_env["HOME"]).mkdir()
+              })
               for mode in ("old", "new"):
                   env = dict(base_env, PR6510_MODE=mode)
                   subprocess.run([sys.executable, "-c", child], env=env, check=True)
