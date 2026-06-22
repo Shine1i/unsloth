@@ -175,6 +175,17 @@ def assert_page_still_authenticated(page, browser_name: str) -> None:
         fail(f"{browser_name}: page token did not authenticate /api/chat/projects, status={status}")
 
 
+def expected_console_error(message: str) -> bool:
+    if is_benign_console_error(message):
+        return True
+    # This repro intentionally creates 401s for wrong-current-password and
+    # old-password checks. Chromium reports those failed fetches as console
+    # errors even though the HTTP status is the expected behavior.
+    return "Failed to load resource" in message and (
+        "401" in message or "Unauthorized" in message
+    )
+
+
 def run_browser(playwright, browser_name: str, current_password: str, next_password: str, simulate_empty_401: bool) -> None:
     status, token = api_login(current_password)
     if status != 200:
@@ -265,7 +276,7 @@ def run_browser(playwright, browser_name: str, current_password: str, next_passw
         info(f"{browser_name}: PASS Settings password change old=401 new=200")
 
         real_page_errors = [e for e in page_errors if not is_benign_page_error(e)]
-        real_console_errors = [e for e in console_errors if not is_benign_console_error(e)]
+        real_console_errors = [e for e in console_errors if not expected_console_error(e)]
         if real_page_errors:
             fail(f"{browser_name}: non-benign page errors: {real_page_errors[:3]!r}")
         if real_console_errors:
