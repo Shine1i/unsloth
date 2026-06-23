@@ -1,0 +1,73 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6594 Frontend Remembered Settings"
+
+on:
+  push:
+    branches:
+      - "pr-6594-remember-load-settings-repro-ci*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "22"
+
+      - name: "Print PR head"
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          git log -1 --oneline
+
+      - name: "Frontend typecheck, i18n, and build"
+        shell: bash
+        run: |
+          cd studio/frontend
+          npm ci
+          npm run typecheck
+          npm run i18n:check
+          npm run build
+
+      - name: "Remembered settings key simulation"
+        shell: bash
+        run: |
+          node --experimental-strip-types --input-type=module <<'EOF'
+          const mod = await import('./studio/frontend/src/components/assistant-ui/model-selector/remembered-load-settings.ts');
+          const store = new Map();
+          globalThis.localStorage = {
+            getItem: (key) => store.has(key) ? store.get(key) : null,
+            setItem: (key, value) => store.set(key, String(value)),
+          };
+          const settings = {
+            contextLength: 4096,
+            kvCacheDtype: 'q8_0',
+            speculativeType: 'ngram',
+            specDraftNMax: 4,
+            tensorParallel: true,
+          };
+          const q4 = mod.rememberedLoadSettingsKey({ id: 'unsloth/test-GGUF', ggufVariant: 'Q4_K_M' });
+          const q8 = mod.rememberedLoadSettingsKey({ id: 'unsloth/test-GGUF', ggufVariant: 'Q8_0' });
+          const local = mod.rememberedLoadSettingsKey({ id: '/models/local.gguf' });
+          mod.saveRememberedLoadSettings(q4, settings);
+          mod.saveRememberedLoadSettings(local, { ...settings, contextLength: null });
+          if (q4 !== 'unsloth/test-GGUF::Q4_K_M') throw new Error(`bad q4 key: ${q4}`);
+          if (q8 !== 'unsloth/test-GGUF::Q8_0') throw new Error(`bad q8 key: ${q8}`);
+          if (local !== '/models/local.gguf') throw new Error(`bad local key: ${local}`);
+          if (mod.loadRememberedLoadSettings(q4)?.contextLength !== 4096) throw new Error('q4 settings missing');
+          if (mod.loadRememberedLoadSettings(q8) !== null) throw new Error('q8 leaked q4 settings');
+          if (mod.loadRememberedLoadSettings(local)?.contextLength !== null) throw new Error('local key changed behavior');
+          console.log('PASS remembered settings are scoped per GGUF quant and local ids are unchanged');
+          EOF
+

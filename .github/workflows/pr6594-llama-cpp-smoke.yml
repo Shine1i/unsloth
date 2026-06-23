@@ -1,0 +1,103 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6594 llama.cpp smoke"
+
+on:
+  push:
+    branches:
+      - "pr-6594-remember-load-settings-repro-ci*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Print PR head"
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          git log -1 --oneline
+
+      - name: "Install runtime deps for unsloth_zoo.llama_cpp"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+          export PYTHONPATH="$GITHUB_WORKSPACE/studio"
+          export UNSLOTH_COMPILE_DISABLE=1
+          export UNSLOTH_IS_PRESENT=1
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu 'torch>=2.4,<2.11' 'torchvision<0.26'
+          pip install 'numpy<3' protobuf sentencepiece requests tqdm psutil packaging safetensors 'peft>=0.18,<0.20' 'accelerate>=0.34,<2'
+          pip install transformers trl
+          pip install -e . --no-deps
+
+      - name: "Clone unsloth_zoo main"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for attempt in 1 2 3; do
+            rm -rf "$RUNNER_TEMP/unsloth-zoo"
+            if git clone --depth=1 --branch=main https://github.com/unslothai/unsloth-zoo "$RUNNER_TEMP/unsloth-zoo"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::git clone unsloth-zoo failed after 3 attempts"
+              exit 1
+            fi
+            delay=$((5 * attempt))
+            echo "::warning::clone failed (attempt $attempt/3), retrying in ${delay}s..."
+            sleep "$delay"
+          done
+          pip install -e "$RUNNER_TEMP/unsloth-zoo" --no-deps
+          pip show unsloth_zoo
+
+      - name: "llama.cpp install via unsloth_zoo.llama_cpp and help smoke"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+          export PYTHONPATH="$GITHUB_WORKSPACE/studio"
+          export UNSLOTH_COMPILE_DISABLE=1
+          export UNSLOTH_IS_PRESENT=1
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake git curl libgomp1 libssl-dev libcurl4-openssl-dev
+          python <<'PY'
+          import os, pathlib, subprocess, sys
+          sys.path.insert(0, str(pathlib.Path('tests').resolve()))
+          import _zoo_aggressive_cuda_spoof as _spoof
+          _spoof.apply()
+          from unsloth_zoo.llama_cpp import install_llama_cpp, LLAMA_CPP_DEFAULT_DIR, LLAMA_CPP_TARGETS
+          print(f'Unsloth llama.cpp default dir: {LLAMA_CPP_DEFAULT_DIR}')
+          print(f'Build targets: {LLAMA_CPP_TARGETS}')
+          quantizer, converter = install_llama_cpp(print_output=True)
+          assert quantizer and os.path.exists(quantizer), f'missing quantizer: {quantizer!r}'
+          assert converter and os.path.isfile(converter), f'missing converter: {converter!r}'
+          install_root = os.path.dirname(quantizer)
+          cli = os.path.join(install_root, 'llama-cli')
+          assert os.path.exists(cli), f'llama-cli not found at {cli!r}; root={sorted(os.listdir(install_root))[:40]}'
+          assert os.access(cli, os.X_OK), f'{cli!r} not executable'
+          proc = subprocess.run([cli, '--help'], capture_output=True, text=True, timeout=30)
+          combined = (proc.stdout or '') + (proc.stderr or '')
+          print('--- llama-cli --help (first 30 lines) ---')
+          print('\n'.join(combined.splitlines()[:30]))
+          assert any(tok in combined.lower() for tok in ('usage', '--help', '--model', '-m,')), f'no recognizable help text: exit={proc.returncode}'
+          q = subprocess.run([quantizer, '--help'], capture_output=True, text=True, timeout=15)
+          q_combined = (q.stdout or '') + (q.stderr or '')
+          assert 'usage' in q_combined.lower() or 'type' in q_combined.lower(), f'llama-quantize no help text: exit={q.returncode}'
+          print(f'PASS llama.cpp smoke: llama-cli={cli} quantizer={quantizer}')
+          PY
+
