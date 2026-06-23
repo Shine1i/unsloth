@@ -72,13 +72,20 @@ jobs:
           git clone --depth 1 https://github.com/unslothai/unsloth-zoo.git temp/unsloth-zoo-main
           PYTHONPATH=temp/unsloth-zoo-main python - <<'PY'
           from pathlib import Path
+          import importlib.util
           import sys
           
-          from unsloth_zoo.llama_cpp import install_llama_cpp
+          module_path = Path("temp/unsloth-zoo-main/unsloth_zoo/llama_cpp.py")
+          spec = importlib.util.spec_from_file_location("llama_cpp_smoke", module_path)
+          if spec is None or spec.loader is None:
+              print("INCONCLUSIVE_LLAMA_CPP_SMOKE: could not load llama_cpp.py")
+              sys.exit(0)
+          llama_cpp = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(llama_cpp)
           
           root = Path("temp/llama-cpp-smoke").resolve()
           try:
-              install_llama_cpp(llama_cpp_folder=str(root), print_output=True)
+              llama_cpp.install_llama_cpp(llama_cpp_folder=str(root), print_output=True)
           except Exception as exc:
               print(f"INCONCLUSIVE_LLAMA_CPP_SMOKE: install failed before inventory check: {type(exc).__name__}: {exc}")
               sys.exit(0)
@@ -96,4 +103,3 @@ jobs:
           else:
               print("INCONCLUSIVE_LLAMA_CPP_SMOKE: llama-server missing too")
           PY
-
