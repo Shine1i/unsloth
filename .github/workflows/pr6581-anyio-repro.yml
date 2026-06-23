@@ -1,0 +1,52 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6581 AnyIO Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6581-anyio-repro-ci-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "macos-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.13"
+
+      - name: "Show runner environment"
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, platform, sys
+          print('RUNNER_OS=' + os.environ.get('RUNNER_OS', 'unknown'))
+          print('platform=' + platform.platform())
+          print('machine=' + platform.machine())
+          print('processor=' + platform.processor())
+          print('python=' + sys.version)
+          PY
+
+      - name: "AnyIO 4.13 control"
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --force-reinstall 'anyio==4.13.0' fastapi starlette
+          python .github/scripts/pr6581_anyio_stream_repro.py --anyio 4.13.0 --iterations 300
+
+      - name: "AnyIO 4.14 candidate"
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall 'anyio==4.14.0' fastapi starlette
+          python .github/scripts/pr6581_anyio_stream_repro.py --anyio 4.14.0 --iterations 300
+
