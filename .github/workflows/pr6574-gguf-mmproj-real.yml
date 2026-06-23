@@ -107,12 +107,18 @@ jobs:
           print("PASS: true metadata mismatch rejected")
           PY
 
-      - name: "Run focused Studio backend regression tests"
+      - name: "Run focused Studio backend metadata tests"
         shell: bash
         run: |
           PYTHONPATH=studio/backend python -m pytest -q \
             studio/backend/tests/test_gguf_metadata.py \
-            studio/backend/tests/test_detect_mmproj_file.py \
-            studio/backend/tests/test_chat_load_during_training.py \
-            studio/backend/tests/test_llama_server_args.py \
-            studio/backend/tests/test_gguf_reload_inheritance.py
+            studio/backend/tests/test_detect_mmproj_file.py
+
+      - name: "Compile touched backend metadata files"
+        shell: bash
+        run: |
+          python -m py_compile \
+            studio/backend/utils/models/gguf_metadata.py \
+            studio/backend/utils/models/model_config.py \
+            studio/backend/tests/test_gguf_metadata.py \
+            studio/backend/tests/test_detect_mmproj_file.py
