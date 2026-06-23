@@ -1,0 +1,93 @@
+name: PR 6438 Tauri Dependency Repro
+
+on:
+  push:
+    branches:
+      - pr-6438-tauri-deps-repro-ci-*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-debug-build:
+    name: ${{ matrix.label }} debug build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: Linux
+          - os: windows-latest
+            label: Windows
+          - os: macos-14
+            label: macOS
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Linux native deps for Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: studio/src-tauri -> target
+
+      - name: Install pinned Tauri CLI
+        run: npm install --save-dev --prefix studio @tauri-apps/cli@2.10.1 --no-fund --no-audit
+
+      - name: Verify pinned Tauri CLI
+        run: |
+          out="$(npx --prefix studio tauri --version)"
+          echo "$out"
+          test "$out" = "tauri-cli 2.10.1"
+
+      - name: Lockfile supply-chain audit
+        run: |
+          if command -v python3 >/dev/null 2>&1; then
+            PYTHON=python3
+          else
+            PYTHON=python
+          fi
+          "$PYTHON" scripts/lockfile_supply_chain_audit.py
+
+      - name: Frontend build
+        working-directory: studio/frontend
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+          test -f dist/index.html
+
+      - name: Rust unit tests
+        working-directory: studio/src-tauri
+        run: cargo test --locked
+
+      - name: Tauri debug build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ''
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: npx --prefix studio tauri build --debug --no-bundle
+
+      - name: Inspect debug binary
+        run: |
+          BIN="$(find studio/src-tauri/target/debug -maxdepth 1 -type f \( -name 'unsloth-studio' -o -name 'unsloth-studio.exe' \) | head -1)"
+          echo "binary=$BIN"
+          test -n "$BIN"
+          ls -lh "$BIN"
