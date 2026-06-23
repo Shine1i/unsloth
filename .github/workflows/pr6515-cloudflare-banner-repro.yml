@@ -1,0 +1,137 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6515 Cloudflare Banner Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6515-cloudflare-banner-repro-ci*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Run targeted Cloudflare banner repro assertions"
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          python --version
+          python - <<'PY'
+          import ast
+          import sys
+          import types
+          from pathlib import Path
+          
+          failures = []
+          
+          src = Path('studio/backend/run.py').read_text()
+          tree = ast.parse(src)
+          func = next(
+              node for node in tree.body
+              if isinstance(node, ast.FunctionDef) and node.name == '_print_cloudflare_line'
+          )
+          func_src = ast.get_source_segment(src, func)
+          stub = types.ModuleType('startup_banner')
+          stub.stdout_supports_color = lambda: False
+          sys.modules['startup_banner'] = stub
+          
+          
+          def render_case(name, **state):
+              captured = []
+              ns = dict(state)
+              ns['print'] = lambda *args, **kwargs: captured.append(' '.join(str(arg) for arg in args))
+              exec(compile(func_src, '<print_cloudflare_line>', 'exec'), ns)
+              ns['_print_cloudflare_line']()
+              out = '\n'.join(captured)
+              print(f'CASE {name}:')
+              print(out or '<silent>')
+              print('---')
+              return out
+          
+          # Reported failure mode 1: the raw wildcard port is already confirmed public.
+          # --no-cloudflare only removes the Cloudflare URL; it does not change bind/firewall.
+          on_public = render_case(
+              'tunnel_on_raw_port_public',
+              _cloudflare_url='https://x.trycloudflare.com',
+              _public_reachable=True,
+              _cloudflare_requested=True,
+              _cloudflare_flag=True,
+          )
+          if 'with --no-cloudflare to keep Studio on your local network only' in on_public:
+              failures.append('ON banner still says --no-cloudflare keeps Studio local-only while raw port is public')
+          
+          # Reported failure mode 2: unsloth studio run starts run_server(silent=True), so
+          # the reachability probe does not run before the custom banner calls this helper.
+          off_unknown = render_case(
+              'silent_run_wildcard_no_cloudflare_no_probe',
+              _cloudflare_url=None,
+              _public_reachable=None,
+              _cloudflare_requested=False,
+              _cloudflare_flag=False,
+          )
+          if 'local network only' in off_unknown:
+              failures.append('OFF banner claims local-only when reachability is unknown in silent run path')
+          
+          failed_unknown = render_case(
+              'silent_run_wildcard_tunnel_failed_no_probe',
+              _cloudflare_url=None,
+              _public_reachable=None,
+              _cloudflare_requested=True,
+              _cloudflare_flag=True,
+          )
+          if 'local network only' in failed_unknown:
+              failures.append('FAILED banner claims local-only when reachability is unknown in silent run path')
+          
+          # Structural proof of the run path that creates the unknown reachability state.
+          studio_src = Path('unsloth_cli/commands/studio.py').read_text()
+          studio_tree = ast.parse(studio_src)
+          run_func = next(
+              node for node in studio_tree.body
+              if isinstance(node, ast.FunctionDef) and node.name == 'run'
+          )
+          run_has_silent_true = any(
+              isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Name)
+              and node.func.id == 'dict'
+              and any(
+                  kw.arg == 'silent' and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                  for kw in node.keywords
+              )
+              for node in ast.walk(run_func)
+          )
+          run_calls_banner_helper = any(
+              isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute)
+              and node.func.attr == '_print_cloudflare_line'
+              for node in ast.walk(run_func)
+          )
+          print(f'AST run_server_silent_true={run_has_silent_true}')
+          print(f'AST run_calls_print_cloudflare_line={run_calls_banner_helper}')
+          if not run_has_silent_true:
+              failures.append('Could not prove run command starts run_server with silent=True')
+          if not run_calls_banner_helper:
+              failures.append('Could not prove run command calls _print_cloudflare_line in its custom banner')
+          
+          if failures:
+              print('REPRO FAILURES:')
+              for failure in failures:
+                  print(f'FAIL: {failure}')
+              raise SystemExit(1)
+          
+          print('PASS: targeted Cloudflare banner assertions')
+          PY
+
