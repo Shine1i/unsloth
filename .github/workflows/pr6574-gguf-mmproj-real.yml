@@ -1,0 +1,118 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6574 GGUF mmproj real repro"
+
+on:
+  push:
+    branches:
+      - "pr-6574-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-repro:
+    name: "backend repro (${{ matrix.os }})"
+    runs-on: "${{ matrix.os }}"
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Install Studio backend dependencies"
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pip install -r studio/backend/requirements/studio.txt
+
+      - name: "Reproduce reported LM Studio local layout"
+        shell: bash
+        run: |
+          PYTHONPATH=studio/backend python - <<'PY'
+          from pathlib import Path
+          import struct
+          import tempfile
+
+          from utils.models.gguf_metadata import pairing_score
+          from utils.models.model_config import detect_mmproj_file
+
+          GGUF_MAGIC = 0x46554747
+
+          def gguf_with_general(path: Path, fields: dict[str, str]) -> Path:
+              body = b""
+              for key, value in fields.items():
+                  key_b = key.encode("utf-8")
+                  value_b = value.encode("utf-8")
+                  body += struct.pack("<Q", len(key_b)) + key_b
+                  body += struct.pack("<I", 8)
+                  body += struct.pack("<Q", len(value_b)) + value_b
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(struct.pack("<IIQQ", GGUF_MAGIC, 3, 0, len(fields)) + body)
+              return path
+
+          root = Path(tempfile.mkdtemp(prefix="LM Studio models "))
+          model_dir = root / "lmstudio-community" / "gemma-4-26B-A4B-it-GGUF"
+          weight_meta = {
+              "general.architecture": "gemma4",
+              "general.type": "model",
+              "general.basename": "gemma-4-26B-A4B-it",
+              "general.base_model.0.repo_url": (
+                  "https://huggingface.co/lmstudio-community/gemma-4-26B-A4B-it-GGUF"
+              ),
+          }
+          mmproj_meta = {
+              "general.architecture": "clip",
+              "general.type": "mmproj",
+              "general.basename": "gemma-4-26B-A4B-it",
+              "general.base_model.0.repo_url": "https://huggingface.co/google/gemma-4-26B-A4B-it",
+          }
+          weight = gguf_with_general(
+              model_dir / "gemma-4-26B-A4B-it-qat-q4_0-uncensored-heretic-Q4_0.gguf",
+              weight_meta,
+          )
+          mmproj = gguf_with_general(model_dir / "mmproj-F16.gguf", mmproj_meta)
+
+          score = pairing_score(weight_meta, mmproj_meta)
+          detected = detect_mmproj_file(str(weight))
+          print(f"repro_root={root}")
+          print(f"weight={weight}")
+          print(f"mmproj={mmproj.resolve()}")
+          print(f"pairing_score={score}")
+          print(f"detected={detected}")
+          assert score == 90, f"expected derivative pairing score 90, got {score}"
+          assert detected == str(mmproj.resolve()), "reported LM Studio layout still drops mmproj"
+          print("PASS: derivative repack mmproj accepted")
+
+          qwen_mmproj_meta = {
+              "general.basename": "Qwen2.5-VL-7B-Instruct",
+              "general.base_model.0.repo_url": "https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct",
+          }
+          mismatch_score = pairing_score(weight_meta, qwen_mmproj_meta)
+          print(f"mismatch_score={mismatch_score}")
+          assert mismatch_score == -1, "true cross-family URL mismatch was not rejected"
+          print("PASS: true metadata mismatch rejected")
+          PY
+
+      - name: "Run focused Studio backend regression tests"
+        shell: bash
+        run: |
+          PYTHONPATH=studio/backend python -m pytest -q \
+            studio/backend/tests/test_gguf_metadata.py \
+            studio/backend/tests/test_detect_mmproj_file.py \
+            studio/backend/tests/test_chat_load_during_training.py \
+            studio/backend/tests/test_llama_server_args.py \
+            studio/backend/tests/test_gguf_reload_inheritance.py

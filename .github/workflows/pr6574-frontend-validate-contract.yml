@@ -1,0 +1,51 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6574 frontend validate contract"
+
+on:
+  push:
+    branches:
+      - "pr-6574-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-contract:
+    name: "validate forwards llama_extra_args"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "22.17.1"
+
+      - name: "Assert validateModel preserves GGUF extra args"
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const src = fs.readFileSync("studio/frontend/src/features/chat/api/chat-api.ts", "utf8");
+          const start = src.indexOf("export async function validateModel");
+          const end = src.indexOf("export async function fetchGgufContextLength");
+          if (start < 0 || end < start) {
+            console.error("FAIL: could not isolate validateModel implementation");
+            process.exit(1);
+          }
+          const body = src.slice(start, end);
+          const typeSrc = fs.readFileSync("studio/frontend/src/features/chat/types/api.ts", "utf8");
+          if (!/llama_extra_args\?:\s*string\[\]\s*\|\s*null/.test(typeSrc)) {
+            console.error("FAIL: LoadModelRequest lacks llama_extra_args typing");
+            process.exit(1);
+          }
+          if (!/llama_extra_args\s*:\s*payload\.llama_extra_args\s*\?\?\s*null/.test(body)) {
+            console.error("FAIL: validateModel drops llama_extra_args before /api/inference/validate");
+            process.exit(1);
+          }
+          console.log("PASS: validateModel forwards llama_extra_args to /api/inference/validate");
+          NODE
