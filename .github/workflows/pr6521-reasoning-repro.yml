@@ -1,0 +1,99 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6521 Reasoning Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6521-reasoning-repro-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.13"
+
+      - name: "Version and branch fingerprint"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python --version
+          node --version
+          npm --version
+          git rev-parse HEAD
+          git log --oneline -5
+
+      - name: "Install backend test dependencies"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pytest httpx huggingface_hub pyyaml psutil packaging requests structlog starlette
+
+      - name: "Run GGUF reasoning stream tests"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PYTHONPATH=studio/backend python -m pytest studio/backend/tests/test_llama_cpp_tool_loop.py -q
+          python -m py_compile studio/backend/core/inference/llama_cpp.py studio/backend/routes/inference.py studio/backend/tests/test_llama_cpp_tool_loop.py
+
+      - name: "Frontend typecheck and build"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd studio/frontend
+          npm ci
+          npm run typecheck
+          npm run build
+
+      - name: "Fingerprint official llama.cpp smoke failure"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install requests tqdm psutil packaging
+          rm -rf temp/unsloth-zoo-main temp/llama-cpp-smoke
+          mkdir -p temp
+          git clone --depth 1 https://github.com/unslothai/unsloth-zoo.git temp/unsloth-zoo-main
+          PYTHONPATH=temp/unsloth-zoo-main python - <<'PY'
+          from pathlib import Path
+          import sys
+          
+          from unsloth_zoo.llama_cpp import install_llama_cpp
+          
+          root = Path("temp/llama-cpp-smoke").resolve()
+          try:
+              install_llama_cpp(llama_cpp_folder=str(root), print_output=True)
+          except Exception as exc:
+              print(f"INCONCLUSIVE_LLAMA_CPP_SMOKE: install failed before inventory check: {type(exc).__name__}: {exc}")
+              sys.exit(0)
+          
+          if not root.exists():
+              print("INCONCLUSIVE_LLAMA_CPP_SMOKE: install root missing")
+              sys.exit(0)
+          
+          names = sorted(p.name for p in root.iterdir())
+          print("LLAMA_CPP_ROOT_CONTENTS=" + repr(names))
+          if not (root / "llama-cli").exists() and (root / "llama-server").exists():
+              print("REPRO_OFFICIAL_SMOKE_FAILURE_SHAPE: llama-cli missing while llama-server exists")
+          elif (root / "llama-cli").exists():
+              print("NO_REPRO_OFFICIAL_SMOKE_FAILURE_SHAPE: llama-cli is present")
+          else:
+              print("INCONCLUSIVE_LLAMA_CPP_SMOKE: llama-server missing too")
+          PY
+
