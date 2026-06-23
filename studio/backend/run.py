@@ -431,7 +431,7 @@ def _emit_secure_startup_output(port: int, enable_tools: "Optional[bool]" = None
     print("")
     print("🦥 Unsloth Studio is running (secure)")
     print("─" * 52)
-    _print_cloudflare_line()
+    _print_cloudflare_line(secure = True)
     print(f"  On this machine only: http://127.0.0.1:{port}/")
     print("─" * 52)
     _emit_tool_policy_notice("127.0.0.1", True, enable_tools)
@@ -467,25 +467,82 @@ def _emit_startup_output(
     print_studio_stop_hint()
 
 
-def _print_cloudflare_line() -> None:
-    """Print the Cloudflare quick-tunnel URL for 0.0.0.0 binds, if one is up.
-
-    Reads the module-level URL set by ``run_server``. Prints nothing when the
-    tunnel is disabled or failed -- failures are silently ignored. When the public
-    reachability probe just failed (``_public_reachable is False``) but the tunnel
-    is up, reword to point the user at the Cloudflare link as the way in.
-    """
-    if not _cloudflare_url:
-        return
+def _print_cloudflare_line(secure: bool = False) -> None:
+    """Print Cloudflare tunnel state for startup banners."""
     from startup_banner import stdout_supports_color
 
     accent = "\033[38;5;150;1m"
+    warn = "\033[38;5;215;1m"
     reset = "\033[0m"
-    if _public_reachable is False:
-        line = f"  Use the secure link access via Cloudflare instead: {_cloudflare_url}"
-    else:
-        line = f"  Secure link access via Cloudflare: {_cloudflare_url}"
-    print(f"{accent}{line}{reset}" if stdout_supports_color() else line)
+    color = stdout_supports_color()
+
+    def _emit(text: str, style: str = "") -> None:
+        print(f"{style}{text}{reset}" if (color and style) else text)
+
+    if _cloudflare_url:
+        if _public_reachable is False:
+            _emit(f"  Use the secure link access via Cloudflare instead: {_cloudflare_url}", accent)
+        else:
+            _emit(f"  Secure link access via Cloudflare: {_cloudflare_url}", accent)
+        if not secure:
+            if _public_reachable is True:
+                _emit(
+                    "  Cloudflare tunnel: ON. This Cloudflare URL is PUBLIC, and the "
+                    "raw port is also publicly reachable. --no-cloudflare disables "
+                    "only the Cloudflare URL; bind 127.0.0.1 or close firewall access "
+                    "to keep Studio private.",
+                    warn,
+                )
+            else:
+                _emit(
+                    "  Cloudflare tunnel: ON. This is a PUBLIC internet URL: anyone "
+                    "who has it can reach this Studio. Relaunch with --no-cloudflare "
+                    "to disable the Cloudflare URL; bind 127.0.0.1 or close firewall "
+                    "access to keep Studio private.",
+                    warn,
+                )
+        return
+    if _cloudflare_requested:
+        if _public_reachable is True:
+            _emit(
+                "  Cloudflare tunnel: requested but failed to start. The raw port is "
+                "still reachable from the public internet (see the reachability check "
+                "above): anyone who can reach it can access this Studio.",
+                warn,
+            )
+        elif _public_reachable is False:
+            _emit(
+                "  Cloudflare tunnel: requested but failed to start. Studio is reachable "
+                "on your local network only (no public link).",
+                warn,
+            )
+        else:
+            _emit(
+                "  Cloudflare tunnel: requested but failed to start. There is no "
+                "Cloudflare public link. Raw port reachability was not verified; bind "
+                "127.0.0.1 or close firewall access to keep Studio private.",
+                warn,
+            )
+    elif not _cloudflare_flag:
+        if _public_reachable is True:
+            _emit(
+                "  Cloudflare tunnel: OFF (--no-cloudflare). The raw port is still "
+                "reachable from the public internet (see the reachability check above): "
+                "--no-cloudflare disables only the Cloudflare link, not the public bind.",
+                warn,
+            )
+        elif _public_reachable is False:
+            _emit(
+                "  Cloudflare tunnel: OFF (--no-cloudflare). Studio is reachable on your "
+                "local network only. Omit --no-cloudflare to expose a public "
+                "Cloudflare HTTPS link."
+            )
+        else:
+            _emit(
+                "  Cloudflare tunnel: OFF (--no-cloudflare). There is no Cloudflare "
+                "public link. Raw port reachability was not verified; bind 127.0.0.1 "
+                "or close firewall access to keep Studio private."
+            )
 
 
 def _get_pid_on_port(port: int) -> "tuple[int, str] | None":
@@ -721,6 +778,9 @@ _cloudflare_url = None
 # False when it confirmed NOT reachable, None when the probe did not run or could
 # not decide (timeout, blocked, private address).
 _public_reachable = None
+
+_cloudflare_requested = False
+_cloudflare_flag = True
 
 
 _DEFAULT_FRONTEND_PATH = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -1178,8 +1238,9 @@ def run_server(
     # Free trycloudflare.com tunnel for 0.0.0.0 binds (the raw ip:port is often
     # unreachable). Started pre-banner and even when silent so the CLI banner can
     # read app.state.cloudflare_url; torn down by _graceful_shutdown.
-    global _cloudflare_url
+    global _cloudflare_url, _cloudflare_requested, _cloudflare_flag
     _cloudflare_url = None
+    _cloudflare_flag = cloudflare
     app.state.cloudflare_url = None
     _cloudflare_enabled = _cloudflare_tunnel_should_start(
         cloudflare = cloudflare,
@@ -1188,6 +1249,7 @@ def run_server(
         api_only = api_only,
         is_colab = _IS_COLAB,
     )
+    _cloudflare_requested = _cloudflare_enabled
     if _cloudflare_enabled:
         try:  # best-effort: any failure must not block startup
             from cloudflare_tunnel import start_studio_tunnel, stop_studio_tunnel
@@ -1255,8 +1317,10 @@ def _build_arg_parser():
         "--cloudflare",
         action = argparse.BooleanOptionalAction,
         default = True,
-        help = "Auto-create a free Cloudflare HTTPS tunnel when bound to 0.0.0.0 "
-        "(default on; --no-cloudflare to disable)",
+        help = "Auto-create a free Cloudflare HTTPS tunnel when bound to 0.0.0.0, "
+        "exposing Studio on a PUBLIC internet URL (default on). Pass --no-cloudflare "
+        "to disable that Cloudflare URL; it does not change a public wildcard bind. "
+        "The startup banner always states whether the tunnel is on or off.",
     )
     parser.add_argument(
         "--secure",

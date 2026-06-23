@@ -688,7 +688,9 @@ def studio_default(
     cloudflare: bool = typer.Option(
         True,
         "--cloudflare/--no-cloudflare",
-        help = "Auto-create a free Cloudflare HTTPS tunnel when bound to 0.0.0.0 (default on).",
+        help = "Auto-create a free Cloudflare HTTPS tunnel when bound to 0.0.0.0, exposing "
+        "Studio on a PUBLIC internet URL (default on). Pass --no-cloudflare to disable "
+        "that Cloudflare URL; it does not change a public wildcard bind.",
     ),
     secure: bool = typer.Option(
         False,
@@ -1078,7 +1080,9 @@ def run(
     cloudflare: bool = typer.Option(
         True,
         "--cloudflare/--no-cloudflare",
-        help = "Auto-create a free Cloudflare HTTPS tunnel when bound to 0.0.0.0 (default on).",
+        help = "Auto-create a free Cloudflare HTTPS tunnel when bound to 0.0.0.0, exposing "
+        "Studio on a PUBLIC internet URL (default on). Pass --no-cloudflare to disable "
+        "that Cloudflare URL; it does not change a public wildcard bind.",
     ),
     secure: bool = typer.Option(
         False,
@@ -1376,8 +1380,9 @@ def run(
             typer.echo(f"  On this machine only: {base_url}")
         else:
             typer.echo(f"  Unsloth Studio running at {base_url}")
-            if _cf_url:
-                typer.echo(f"  Secure link access via Cloudflare: {_cf_url}")
+            if host in ("0.0.0.0", "::"):
+                run_mod._verify_global_reachability(display_host, actual_port)
+                run_mod._print_cloudflare_line(secure = secure)
         typer.echo(f"  Model loaded: {loaded_model}{display_variant}")
         if context_length_line:
             typer.echo(context_length_line)
