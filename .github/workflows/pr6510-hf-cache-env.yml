@@ -1,0 +1,158 @@
+name: PR 6510 HF cache env repro
+
+on:
+  push:
+    branches:
+      - "pr-6510-*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  hf-cache-env:
+    name: ${{ matrix.os }} / hf ${{ matrix.hf }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        hf: ["0.34.0", "latest"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install focused dependencies
+        shell: bash
+        run: |
+          python -m pip install -U pip pytest
+          if [ "${{ matrix.hf }}" = "latest" ]; then
+            python -m pip install -U huggingface_hub
+          else
+            python -m pip install "huggingface_hub==${{ matrix.hf }}"
+          fi
+          python - <<'PY'
+          import huggingface_hub
+          print("huggingface_hub", huggingface_hub.__version__)
+          PY
+
+      - name: Compile changed files
+        shell: bash
+        run: |
+          python -m py_compile \
+            studio/backend/utils/paths/storage_roots.py \
+            studio/backend/tests/test_setup_cache_env_hf_home.py
+
+      - name: Run focused PR tests
+        shell: bash
+        run: python -m pytest -q studio/backend/tests/test_setup_cache_env_hf_home.py
+
+      - name: Reproduce old miss and new hit with real huggingface_hub
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import json
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          repo = Path.cwd()
+          storage_roots = repo / "studio/backend/utils/paths/storage_roots.py"
+
+          child = r'''
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+
+          mode = os.environ.pop("PR6510_MODE")
+          storage_roots = Path(os.environ.pop("PR6510_STORAGE_ROOTS"))
+
+          repo_id = "org/repo"
+          commit = "2" * 40
+          custom_home = Path(os.environ["HF_HOME"])
+          custom_hub = custom_home / "hub"
+          snap = custom_hub / "models--org--repo" / "snapshots" / commit
+          refs = custom_hub / "models--org--repo" / "refs"
+          snap.mkdir(parents=True, exist_ok=True)
+          refs.mkdir(parents=True, exist_ok=True)
+          (snap / "config.json").write_text('{"ok": true}', encoding="utf-8")
+          (refs / "main").write_text(commit, encoding="utf-8")
+
+          def old_setup():
+              root = Path(os.environ["UNSLOTH_STUDIO_HOME"]) / "cache"
+              xdg_cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
+              hf_default = xdg_cache / "huggingface"
+              defaults = {
+                  "HF_HOME": str(hf_default),
+                  "HF_HUB_CACHE": str(hf_default / "hub"),
+                  "HF_XET_CACHE": str(hf_default / "xet"),
+                  "UV_CACHE_DIR": str(root / "uv"),
+                  "VLLM_CACHE_ROOT": str(root / "vllm"),
+              }
+              for key, value in defaults.items():
+                  if key not in os.environ:
+                      os.environ[key] = value
+                      Path(value).mkdir(parents=True, exist_ok=True)
+
+          def new_setup():
+              spec = importlib.util.spec_from_file_location("storage_roots_under_test", storage_roots)
+              module = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(module)
+              module._setup_cache_env()
+
+          if mode == "old":
+              old_setup()
+          elif mode == "new":
+              new_setup()
+          else:
+              raise SystemExit(mode)
+
+          from huggingface_hub import constants as c, try_to_load_from_cache
+
+          found = try_to_load_from_cache(repo_id, "config.json", revision="main")
+          result = {
+              "mode": mode,
+              "HF_HOME": c.HF_HOME,
+              "HF_HUB_CACHE": c.HF_HUB_CACHE,
+              "HF_XET_CACHE": c.HF_XET_CACHE,
+              "found": None if found is None else str(found),
+              "custom_file": str(snap / "config.json"),
+              "found_custom_cache": found == str(snap / "config.json"),
+          }
+          print(json.dumps(result, sort_keys=True))
+          if mode == "old":
+              assert not result["found_custom_cache"], result
+          else:
+              assert result["found_custom_cache"], result
+              assert result["HF_HUB_CACHE"] == str(custom_home / "hub"), result
+              assert result["HF_XET_CACHE"] == str(custom_home / "xet"), result
+          '''
+
+          temp_root = repo / "temp" / "pr6510-ci"
+          temp_root.mkdir(parents=True, exist_ok=True)
+          with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
+              tmp_path = Path(tmp)
+              home = tmp_path / "home"
+              home.mkdir()
+              base_env = os.environ.copy()
+              base_env.update({
+                  "PYTHONPATH": "",
+                  "HOME": str(home),
+                  "USERPROFILE": str(home),
+                  "XDG_CACHE_HOME": str(tmp_path / "xdg-cache"),
+                  "UNSLOTH_STUDIO_HOME": str(tmp_path / "studio"),
+                  "HF_HOME": str(tmp_path / "custom-hf"),
+                  "PR6510_STORAGE_ROOTS": str(storage_roots),
+              })
+              for mode in ("old", "new"):
+                  env = dict(base_env, PR6510_MODE=mode)
+                  subprocess.run([sys.executable, "-c", child], env=env, check=True)
+          PY
