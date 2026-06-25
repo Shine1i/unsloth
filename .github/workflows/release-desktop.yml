@@ -690,6 +690,69 @@ jobs:
           prerelease: ${{ needs.prepare-version.outputs.prerelease }}
           args: -v ${{ matrix.args }}
 
+  hide-updater-signature-assets:
+    name: Hide updater signature assets
+    needs: [prepare-version, build]
+    if: ${{ needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      DESKTOP_RELEASE_TAG: ${{ needs.prepare-version.outputs.desktop_release_tag }}
+
+    steps:
+      - name: Delete public updater signature assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/desktop-release.json"
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${DESKTOP_RELEASE_TAG}" > "$release_json"
+          export RELEASE_JSON="$release_json"
+
+          deleted=0
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if [ -z "$asset_id" ]; then
+              continue
+            fi
+            echo "Deleting release asset: $asset_name"
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+            deleted=$((deleted + 1))
+          done < <(
+            python3 <<'PY'
+          import json
+          import os
+          import pathlib
+
+          release = json.loads(pathlib.Path(os.environ["RELEASE_JSON"]).read_text())
+          for asset in release.get("assets", []):
+              name = asset.get("name")
+              asset_id = asset.get("id")
+              if isinstance(name, str) and name.endswith(".sig") and asset_id is not None:
+                  print(f"{asset_id}\t{name}")
+          PY
+          )
+          echo "Deleted $deleted updater signature asset(s)."
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${DESKTOP_RELEASE_TAG}" > "$release_json"
+          python3 <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(os.environ["RELEASE_JSON"]).read_text())
+          remaining = [
+              asset.get("name")
+              for asset in release.get("assets", [])
+              if isinstance(asset.get("name"), str) and asset["name"].endswith(".sig")
+          ]
+          if remaining:
+              sys.exit("Updater signature assets still visible: " + ", ".join(remaining))
+          PY
+
   # Release process note: only non-draft workflow runs advance the public
   # desktop-latest updater channel. Draft builds are for private review; if a
   # draft is manually published later, this channel intentionally remains
@@ -697,7 +760,7 @@ jobs:
   # desktop release is created by running this workflow with draft=false.
   publish-updater-channel:
     name: Publish desktop updater channel
-    needs: [prepare-version, build]
+    needs: [prepare-version, build, hide-updater-signature-assets]
     if: ${{ !inputs.draft }}
     runs-on: ubuntu-latest
     permissions:
