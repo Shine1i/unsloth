@@ -1,0 +1,93 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6642 Extractor Repro Windows"
+
+on:
+  push:
+    branches:
+      - "pr-6642-extractor-repro-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "windows-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.13"
+
+      - name: "Install focused route deps"
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install fastapi pydantic structlog python-multipart
+
+      - name: "Reproduce base and verify PR head"
+        shell: bash
+        run: |
+          rm -rf temp/pr6642-base temp/pr6642-proof
+          mkdir -p temp/pr6642-proof
+          git fetch --depth=1 https://github.com/unslothai/unsloth.git 346d96d7f242261f0db52cee8d3b589b2a9dea9f
+          git worktree add --detach temp/pr6642-base FETCH_HEAD
+          python - <<'PY'
+          import asyncio
+          import importlib.util
+          import json
+          import shutil
+          import sys
+          from pathlib import Path
+          
+          root = Path('temp/pr6642-proof').resolve()
+          shutil.rmtree(root, ignore_errors=True)
+          root.mkdir(parents=True)
+          
+          class FakeUpload:
+              filename = 'paper.pdf'
+          
+              async def read(self):
+                  return b'%PDF-1.7'
+          
+          def unload_backend_modules():
+              for name in list(sys.modules):
+                  if name in {'models', 'models.data_recipe', 'utils', 'utils.paths', 'utils.utils', 'loggers'}:
+                      sys.modules.pop(name, None)
+          
+          async def run_case(label, repo_root):
+              unload_backend_modules()
+              backend_root = (repo_root / 'studio/backend').resolve()
+              sys.path.insert(0, str(backend_root))
+              try:
+                  spec = importlib.util.spec_from_file_location(f'seed_{label}', backend_root / 'routes/data_recipe/seed.py')
+                  module = importlib.util.module_from_spec(spec)
+                  spec.loader.exec_module(module)
+                  module.UNSTRUCTURED_UPLOAD_ROOT = root / label / 'uploads'
+                  result = await module.upload_unstructured_file(FakeUpload(), 'block')
+                  block_dir = module.UNSTRUCTURED_UPLOAD_ROOT / 'block'
+                  files = sorted(path.name for path in block_dir.iterdir()) if block_dir.exists() else []
+                  return {'status': result.status, 'error': result.error, 'files_left': files}
+              finally:
+                  sys.path.remove(str(backend_root))
+          
+          async def main():
+              base = await run_case('base', Path('temp/pr6642-base'))
+              head = await run_case('head', Path('.'))
+              print(json.dumps({'base': base, 'head': head}, indent=2, sort_keys=True))
+              assert base['status'] == 'error'
+              assert base['error'] == 'Text extraction failed.'
+              assert base['files_left'] == []
+              assert head['status'] == 'error'
+              assert head['error'] == "Cannot read .pdf files: the 'pymupdf4llm' package is not installed."
+              assert head['files_left'] == []
+          
+          asyncio.run(main())
+          PY
+
