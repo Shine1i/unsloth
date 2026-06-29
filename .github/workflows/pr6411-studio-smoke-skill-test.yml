@@ -22,8 +22,8 @@ jobs:
         os: ["ubuntu-latest"]
         browser: ["chromium"]
     env:
-      UNSLOTH_STUDIO_HOME: ${{ runner.temp }}/unsloth-studio-live/home
-      STUDIO_ARTIFACT_DIR: ${{ runner.temp }}/unsloth-studio-live/artifacts/${{ matrix.os }}-${{ matrix.browser }}
+      UNSLOTH_STUDIO_HOME: ${{ github.workspace }}/.studio-live/home
+      STUDIO_ARTIFACT_DIR: ${{ github.workspace }}/.studio-live/artifacts/${{ matrix.os }}-${{ matrix.browser }}
       STUDIO_BROWSER: ${{ matrix.browser }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -69,5 +69,5 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: studio-smoke-${{ matrix.os }}-${{ matrix.browser }}
-          path: ${{ runner.temp }}/unsloth-studio-live/artifacts
+          path: ${{ github.workspace }}/.studio-live/artifacts
           if-no-files-found: warn
