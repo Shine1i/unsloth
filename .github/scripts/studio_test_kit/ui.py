@@ -94,8 +94,13 @@ async def open_chat(
     # happens unconditionally.
     try:
         async with async_playwright() as p:
-            browser_type = getattr(p, browser_name)
-            browser = await browser_type.launch(headless=headless, slow_mo=slow_mo_ms)
+            if browser_name in {"edge", "msedge"}:
+                browser = await p.chromium.launch(
+                    channel="msedge", headless=headless, slow_mo=slow_mo_ms
+                )
+            else:
+                browser_type = getattr(p, browser_name)
+                browser = await browser_type.launch(headless=headless, slow_mo=slow_mo_ms)
             kw: dict = {"viewport": {"width": viewport[0], "height": viewport[1]}}
             if video_dir is not None:
                 video_dir.mkdir(parents=True, exist_ok=True)

@@ -295,7 +295,14 @@ async def assert_ui(base_url: str, init_script: str, browser_name: str, artifact
         project = page.get_by_text(NORMALIZED_PROJECT, exact=True).first
         await project.wait_for(state="visible", timeout=30_000)
         await sp.screenshot(artifact_dir / f"history-project-name-{browser_name}.png")
-        await project.click(timeout=30_000)
+        card = page.locator('[role="button"]', has_text=NORMALIZED_PROJECT).first
+        await card.click(timeout=30_000)
+        # The historical detail view renders the run metrics; waiting on the
+        # output folder proves the click navigated away from the history grid.
+        await page.get_by_text(RUN_DIR_NAME, exact=False).first.wait_for(
+            state="visible",
+            timeout=30_000,
+        )
         await page.get_by_text(NORMALIZED_PROJECT, exact=True).first.wait_for(
             state="visible",
             timeout=30_000,
