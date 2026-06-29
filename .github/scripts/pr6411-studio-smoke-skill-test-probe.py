@@ -240,6 +240,19 @@ def video_dir(artifact_dir: Path, name: str) -> Path | None:
 async def auth_init(base_url: str, password: str, providers: list | None = None) -> str:
     auth = await login(base_url, "unsloth", password)
     pass_log("Studio API login succeeded")
+    if auth.must_change_password:
+        new_password = os.environ.get("STUDIO_TEST_PASSWORD", "UnslothStudioCI2026!")
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"{base_url}/api/auth/change-password",
+                headers={"Authorization": f"Bearer {auth.access_token}"},
+                json={"current_password": password, "new_password": new_password},
+            )
+            response.raise_for_status()
+            body = response.json()
+        auth.access_token = body["access_token"]
+        auth.refresh_token = body.get("refresh_token", "")
+        pass_log("Studio first-boot password change completed")
     return seed_init_script(auth, providers or [])
 
 
