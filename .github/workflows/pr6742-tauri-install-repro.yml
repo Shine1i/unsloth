@@ -1,0 +1,280 @@
+# Disposable PR #6742 repro workflow. Delete after validation.
+
+name: "PR 6742 Tauri Install Startup Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6742-tauri-install-repro-ci-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tauri-install-startup:
+    name: "${{ matrix.os }} tauri install and managed startup"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Linux native deps for Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+
+      - name: Windows speedups
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Write-Host "npm version before upgrade: $(npm -v)"
+          npm install -g 'npm@^11' 2>&1 | Out-Host
+          Write-Host "npm version after upgrade: $(npm -v)"
+          foreach ($p in @(
+            "$env:USERPROFILE\.unsloth",
+            "$env:USERPROFILE\AppData\Local\uv",
+            "$env:GITHUB_WORKSPACE\studio\frontend\node_modules",
+            "$env:GITHUB_WORKSPACE\studio\frontend\dist"
+          )) {
+            try {
+              Add-MpPreference -ExclusionPath $p -ErrorAction Stop
+              Write-Host "Defender exclusion added: $p"
+            } catch {
+              Write-Host "Defender exclusion skipped ($($_.Exception.Message)): $p"
+            }
+          }
+
+      - name: Tauri install and managed startup probe (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          rm -rf "$HOME/.unsloth/studio" "$HOME/.unsloth/llama.cpp"
+
+          echo "== prove --tauri rejects custom roots when launched directly =="
+          set +e
+          UNSLOTH_STUDIO_HOME="$PWD/.custom-studio" bash ./install.sh --tauri --local --no-torch \
+            > logs/custom-root-reject.log 2>&1
+          reject_rc=$?
+          set -e
+          if [ "$reject_rc" -eq 0 ]; then
+            echo "::error::install.sh --tauri accepted a custom UNSLOTH_STUDIO_HOME"
+            exit 1
+          fi
+          grep -E "not supported with --tauri|legacy ~/.unsloth/studio root" logs/custom-root-reject.log
+
+          echo "== install default Tauri-managed Studio root =="
+          unset UNSLOTH_STUDIO_HOME STUDIO_HOME
+          bash ./install.sh --tauri --local --no-torch 2>&1 | tee logs/install.log
+
+          BIN="$HOME/.unsloth/studio/unsloth_studio/bin/unsloth"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::managed unsloth binary missing at $BIN"
+            find "$HOME/.unsloth/studio" -maxdepth 4 -type f | sort | sed -n '1,120p' || true
+            exit 1
+          fi
+          "$BIN" -h > logs/unsloth-help.txt
+          echo "PASS managed unsloth -h"
+
+          PORT=18888
+          OWNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+          OWNER_SHA="$(OWNER_TOKEN="$OWNER_TOKEN" python3 -c 'import hashlib, os; print(hashlib.sha256(os.environ["OWNER_TOKEN"].encode("utf-8")).hexdigest())')"
+          export PORT OWNER_SHA
+
+          echo "== start managed backend with Tauri owner env =="
+          UNSLOTH_STUDIO_DESKTOP_OWNER_TOKEN="$OWNER_TOKEN" \
+          UNSLOTH_STUDIO_DESKTOP_OWNER_KIND="tauri" \
+            "$BIN" studio --api-only -H 127.0.0.1 -p "$PORT" \
+            > logs/managed-backend.log 2>&1 &
+          BACKEND_PID=$!
+          trap 'kill "$BACKEND_PID" 2>/dev/null || true; wait "$BACKEND_PID" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 240); do
+            if grep -q "TAURI_PORT=$PORT" logs/managed-backend.log; then
+              break
+            fi
+            if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+              echo "::error::managed backend exited before TAURI_PORT"
+              tail -200 logs/managed-backend.log || true
+              exit 1
+            fi
+            sleep 1
+          done
+          grep -q "TAURI_PORT=$PORT" logs/managed-backend.log || {
+            echo "::error::TAURI_PORT was not emitted after readiness"
+            tail -200 logs/managed-backend.log || true
+            exit 1
+          }
+
+          python3 - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+
+          port = os.environ["PORT"]
+          expected_sha = os.environ["OWNER_SHA"]
+
+          def get_json(path):
+              with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+          last = None
+          for _ in range(60):
+              try:
+                  live = get_json("/api/liveness")
+                  break
+              except Exception as exc:
+                  last = exc
+                  time.sleep(1)
+          else:
+              raise SystemExit(f"FAIL /api/liveness was not reachable: {last}")
+
+          assert live["status"] == "alive", live
+          assert live["service"] == "Unsloth UI Backend", live
+          assert live.get("supports_desktop_auth") is True, live
+          assert live.get("supports_desktop_backend_ownership") is True, live
+          assert live.get("desktop_owner", {}).get("kind") == "tauri", live
+          assert live.get("desktop_owner", {}).get("token_sha256") == expected_sha, live
+
+          health = get_json("/api/health")
+          assert health["status"] == "healthy", health
+          assert health["service"] == "Unsloth UI Backend", health
+          assert "version" not in health, health
+          print("PASS tauri managed startup liveness and unauthenticated health")
+          PY
+
+      - name: Tauri install and managed startup probe (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force -Path logs | Out-Null
+          Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.unsloth\studio') -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.unsloth\llama.cpp') -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host '== prove --tauri rejects custom roots when launched directly =='
+          $env:UNSLOTH_STUDIO_HOME = Join-Path $PWD '.custom-studio'
+          $failed = $false
+          try {
+            & ./install.ps1 --tauri --local --no-torch *>&1 | Tee-Object -FilePath logs/custom-root-reject.log
+          } catch {
+            $failed = $true
+            $_ | Out-String | Add-Content -LiteralPath logs/custom-root-reject.log
+          } finally {
+            Remove-Item Env:UNSLOTH_STUDIO_HOME -ErrorAction SilentlyContinue
+          }
+          if (-not $failed) {
+            throw 'install.ps1 --tauri accepted a custom UNSLOTH_STUDIO_HOME'
+          }
+          Select-String -Path logs/custom-root-reject.log -Pattern 'not supported with --tauri|legacy %USERPROFILE%\\.unsloth\\studio root' | Out-Host
+
+          Write-Host '== install default Tauri-managed Studio root =='
+          Remove-Item Env:STUDIO_HOME -ErrorAction SilentlyContinue
+          & ./install.ps1 --tauri --local --no-torch *>&1 | Tee-Object -FilePath logs/install.log
+
+          $bin = Join-Path $env:USERPROFILE '.unsloth\studio\unsloth_studio\Scripts\unsloth.exe'
+          if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) {
+            Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE '.unsloth\studio') -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 120 | Format-Table -AutoSize | Out-Host
+            throw "managed unsloth binary missing at $bin"
+          }
+          & $bin -h | Out-File -FilePath logs/unsloth-help.txt -Encoding utf8
+          Write-Host 'PASS managed unsloth -h'
+
+          $port = 18888
+          $bytes = New-Object byte[] 32
+          [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $ownerToken = [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
+          $ownerSha = [System.BitConverter]::ToString(
+            [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($ownerToken))
+          ).Replace('-', '').ToLowerInvariant()
+
+          Write-Host '== start managed backend with Tauri owner env =='
+          $env:UNSLOTH_STUDIO_DESKTOP_OWNER_TOKEN = $ownerToken
+          $env:UNSLOTH_STUDIO_DESKTOP_OWNER_KIND = 'tauri'
+          $proc = Start-Process -FilePath $bin `
+            -ArgumentList @('studio', '--api-only', '-H', '127.0.0.1', '-p', [string]$port) `
+            -RedirectStandardOutput logs/managed-backend.out `
+            -RedirectStandardError logs/managed-backend.err `
+            -WindowStyle Hidden `
+            -PassThru
+          Remove-Item Env:UNSLOTH_STUDIO_DESKTOP_OWNER_TOKEN -ErrorAction SilentlyContinue
+          Remove-Item Env:UNSLOTH_STUDIO_DESKTOP_OWNER_KIND -ErrorAction SilentlyContinue
+
+          try {
+            $sawPort = $false
+            foreach ($i in 1..240) {
+              if ($proc.HasExited) {
+                Get-Content logs/managed-backend.out,logs/managed-backend.err -ErrorAction SilentlyContinue | Select-Object -Last 200 | Out-Host
+                throw 'managed backend exited before TAURI_PORT'
+              }
+              $combined = (Get-Content logs/managed-backend.out,logs/managed-backend.err -ErrorAction SilentlyContinue) -join "`n"
+              if ($combined -match "TAURI_PORT=$port") {
+                $sawPort = $true
+                break
+              }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $sawPort) {
+              Get-Content logs/managed-backend.out,logs/managed-backend.err -ErrorAction SilentlyContinue | Select-Object -Last 200 | Out-Host
+              throw 'TAURI_PORT was not emitted after readiness'
+            }
+
+            $live = $null
+            foreach ($i in 1..60) {
+              try {
+                $live = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/liveness" -TimeoutSec 2
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if ($null -eq $live) { throw '/api/liveness was not reachable' }
+            if ($live.status -ne 'alive') { throw "unexpected liveness status: $($live | ConvertTo-Json -Depth 8)" }
+            if ($live.service -ne 'Unsloth UI Backend') { throw "unexpected liveness service: $($live | ConvertTo-Json -Depth 8)" }
+            if ($live.supports_desktop_auth -ne $true) { throw 'supports_desktop_auth was not true' }
+            if ($live.supports_desktop_backend_ownership -ne $true) { throw 'supports_desktop_backend_ownership was not true' }
+            if ($live.desktop_owner.kind -ne 'tauri') { throw "unexpected desktop owner: $($live | ConvertTo-Json -Depth 8)" }
+            if ($live.desktop_owner.token_sha256 -ne $ownerSha) { throw 'desktop owner token sha mismatch' }
+
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/health" -TimeoutSec 2
+            if ($health.status -ne 'healthy') { throw "unexpected health status: $($health | ConvertTo-Json -Depth 8)" }
+            if ($health.service -ne 'Unsloth UI Backend') { throw "unexpected health service: $($health | ConvertTo-Json -Depth 8)" }
+            if ($health.PSObject.Properties.Name -contains 'version') { throw 'unauthenticated /api/health leaked version' }
+            Write-Host 'PASS tauri managed startup liveness and unauthenticated health'
+          } finally {
+            if ($proc -and -not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              $proc.WaitForExit(10000) | Out-Null
+            }
+          }
+
+      - name: Upload repro logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: tauri-install-startup-${{ matrix.os }}
+          path: logs
+          retention-days: 5
