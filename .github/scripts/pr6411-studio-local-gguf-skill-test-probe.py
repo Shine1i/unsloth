@@ -345,7 +345,7 @@ async def scenario_vision_upload(base_url: str, password: str, browser_name: str
     pass_log("vision upload flow completed")
 
 
-async def scenario_local_chat(base_url: str, api_key: str, browser_name: str, artifact_dir: Path) -> None:
+async def scenario_local_chat(base_url: str, api_key: str, browser_name: str, artifact_dir: Path, password: str | None) -> None:
     payload = {
         "model": LOCAL_MODEL,
         "messages": [{"role": "user", "content": PROMPT}],
@@ -366,9 +366,12 @@ async def scenario_local_chat(base_url: str, api_key: str, browser_name: str, ar
     if not content:
         fail("local-chat API returned no assistant content")
     pass_log("local small-model chat API returned assistant content")
+
+    init_scripts = [await auth_init(base_url, password)] if password else []
     try:
         async with open_chat(
             base_url,
+            init_scripts=init_scripts,
             video_dir=video_dir(artifact_dir, "local-chat"),
             video_name=f"local-chat-{browser_name}",
             transcode_mp4=False,
@@ -477,7 +480,9 @@ async def main() -> None:
             api_key = read_api_key(log_path)
             health_path = wait_for_health(base_url, timeout_s=900)
             pass_log(f"Studio run healthy at {health_path} on {base_url}")
-            await scenario_local_chat(base_url, api_key, browser_name, artifact_dir)
+
+            password = read_bootstrap_password(home, log_path)
+            await scenario_local_chat(base_url, api_key, browser_name, artifact_dir, password)
         else:
             log_path = artifact_dir / "studio.log"
             proc = start_plain_studio(home, log_path, port)
