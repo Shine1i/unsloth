@@ -1,0 +1,99 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6411 Studio Compare Adapter Repro macOS"
+
+on:
+  push:
+    branches:
+      - "pr-6411-studio-compare-adapter-repro-ci*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "macos-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "22.17.1"
+
+      - name: "Assert Studio compare first-send adapter request shape"
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          
+          const adapterPath = 'studio/frontend/src/features/chat/api/chat-adapter.ts';
+          const runtimePath = 'studio/frontend/src/features/chat/runtime-provider.tsx';
+          const adapter = fs.readFileSync(adapterPath, 'utf8');
+          const runtime = fs.readFileSync(runtimePath, 'utf8');
+          
+          let failures = 0;
+          function check(condition, message) {
+            if (condition) {
+              console.log(`PASS ${message}`);
+            } else {
+              console.error(`FAIL ${message}`);
+              failures += 1;
+            }
+          }
+          
+          const resolveStart = adapter.indexOf('async function resolveUseAdapter(');
+          const threadFallback = adapter.indexOf('if (!threadId)', resolveStart);
+          const pairShortcut = adapter.indexOf('options.pairId', resolveStart);
+          const createStart = adapter.indexOf('export function createOpenAIStreamAdapter(');
+          const resolveCall = adapter.indexOf('resolveUseAdapter(resolvedThreadId, options)', createStart);
+          
+          check(adapter.includes('import type { ModelType } from "../types";'), 'adapter imports the chat ModelType discriminant');
+          check(adapter.includes('type OpenAIStreamAdapterOptions = {') && adapter.includes('modelType?: ModelType;') && adapter.includes('pairId?: string;'), 'adapter has explicit pane-context options');
+          check(resolveStart !== -1, 'resolveUseAdapter exists');
+          check(pairShortcut > resolveStart && pairShortcut < threadFallback, 'paired base/lora shortcut runs before persisted-thread lookup');
+          check(adapter.includes('options.modelType === "model1" || options.modelType === "model2"'), 'general compare panes explicitly skip adapter toggles');
+          check(adapter.includes('return options.modelType === "lora";'), 'lora pane maps to use_adapter=true and base pane maps to false');
+          check(createStart !== -1 && adapter.slice(createStart, createStart + 180).includes('options: OpenAIStreamAdapterOptions = {}'), 'stream adapter factory accepts pane context');
+          check(resolveCall !== -1, 'stream request resolves use_adapter with pane context');
+          check(!runtime.includes('const chatAdapter = createOpenAIStreamAdapter();'), 'runtime no longer shares a context-free singleton adapter');
+          check(runtime.includes('createOpenAIStreamAdapter({ modelType, pairId })'), 'runtime passes modelType and pairId into the stream adapter');
+          check(runtime.includes('[modelType, pairId]'), 'runtime rebuilds persisted adapter when pane context changes');
+          
+          function resolveUseAdapterAfter(threadId, options = {}, storedThread) {
+            if (options.modelType === 'model1' || options.modelType === 'model2') return undefined;
+            if (options.pairId && (options.modelType === 'base' || options.modelType === 'lora')) return options.modelType === 'lora';
+            if (!threadId) return undefined;
+            const thread = storedThread;
+            if (!thread?.pairId) return undefined;
+            if (thread.modelType === 'model1' || thread.modelType === 'model2') return undefined;
+            return thread.modelType === 'lora';
+          }
+          function requestShape(useAdapter) {
+            return useAdapter === undefined ? 'omitted' : String(useAdapter);
+          }
+          const cases = [
+            ['reported first-send base pane without stored thread', 'false', 'base-thread', { modelType: 'base', pairId: 'pair-1' }, undefined],
+            ['reported first-send lora pane without stored thread', 'true', 'lora-thread', { modelType: 'lora', pairId: 'pair-1' }, undefined],
+            ['single base chat remains OpenAI-compatible/omitted', 'omitted', 'single-thread', { modelType: 'base' }, undefined],
+            ['general compare model1 remains omitted', 'omitted', 'm1-thread', { modelType: 'model1', pairId: 'pair-2' }, { modelType: 'base', pairId: 'pair-2' }],
+            ['general compare model2 remains omitted', 'omitted', 'm2-thread', { modelType: 'model2', pairId: 'pair-2' }, { modelType: 'lora', pairId: 'pair-2' }],
+            ['refresh fallback for persisted base thread remains false', 'false', 'base-thread', {}, { modelType: 'base', pairId: 'pair-1' }],
+            ['refresh fallback for persisted lora thread remains true', 'true', 'lora-thread', {}, { modelType: 'lora', pairId: 'pair-1' }],
+          ];
+          for (const [name, expected, threadId, options, storedThread] of cases) {
+            const actual = requestShape(resolveUseAdapterAfter(threadId, options, storedThread));
+            check(actual === expected, `${name}: use_adapter=${actual}`);
+          }
+          
+          if (failures) {
+            console.error(`FAIL repro assertions: ${failures} failure(s). This is the pre-PR/request-shape bug or a regression.`);
+            process.exit(1);
+          }
+          console.log('PASS PR 6411 targeted repro: first compare send sends base=false, lora=true, and unaffected paths omit use_adapter.');
+          NODE
+
