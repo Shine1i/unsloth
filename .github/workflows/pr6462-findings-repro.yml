@@ -1,0 +1,134 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6462 Findings Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6462-findings-repro-ci*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Repro non-MLX test does not skip on missing torch"
+        shell: bash
+        run: |
+          python -m pip install -q pytest
+          cat > /tmp/test_pr6462_non_mlx_import_skip.py <<'PY'
+          import importlib.util
+          from pathlib import Path
+          
+          module_path = Path('tests/python/test_mlx_public_trainer_api.py')
+          spec = importlib.util.spec_from_file_location('test_mlx_public_trainer_api_under_repro', module_path)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          
+          # This is the exact PR test helper path. On an Ubuntu runner without torch,
+          # importing unsloth raises ImportError("Unsloth: torch not found...").
+          # The test catches only ModuleNotFoundError for bitsandbytes/triton, so pytest
+          # fails instead of skipping.
+          mod.test_non_mlx_exports_public_trainer_api_when_available()
+          PY
+          set +e
+          python -m pytest -q /tmp/test_pr6462_non_mlx_import_skip.py > /tmp/non_mlx.out 2>&1
+          status=$?
+          set -e
+          cat /tmp/non_mlx.out
+          if [ "$status" -ne 0 ] && grep -q 'ImportError: Unsloth: torch not found' /tmp/non_mlx.out; then
+            echo 'REPRO PASS: non-MLX smoke test fails instead of skipping when torch is unavailable'
+          else
+            echo "REPRO FAIL: expected ImportError-based pytest failure, got status=$status"
+            exit 1
+          fi
+
+      - name: "Repro MLX shim logic findings with synthetic live imports"
+        shell: bash
+        run: |
+          cat > /tmp/pr6462_mlx_shim_repro.py <<'PY'
+          from pathlib import Path
+          import re
+          
+          source = Path('unsloth/__init__.py').read_text()
+          
+          # Reproduce stale test identity assertion using the PR's actual implementation shape.
+          class UnslothTrainingArguments:
+              pass
+          class _MLXSFTConfig(UnslothTrainingArguments):
+              pass
+          class Trl:
+              pass
+          trl = Trl()
+          trl.SFTConfig = _MLXSFTConfig
+          if trl.SFTConfig is UnslothTrainingArguments:
+              raise SystemExit('REPRO FAIL: identity unexpectedly true')
+          print('REPRO PASS: trl.SFTConfig is subclass, not identical to UnslothTrainingArguments')
+          
+          # Reproduce missing RLOOTrainer against current TRL public trainer exports.
+          unsupported_match = re.search(r'_MLX_UNSUPPORTED_TRL_TRAINERS = \(\n(?P<body>.*?)\n    \)', source, re.S)
+          if not unsupported_match:
+              raise SystemExit('REPRO FAIL: could not locate unsupported trainer tuple')
+          unsupported = set(re.findall(r'"([^"]+Trainer)"', unsupported_match.group('body')))
+          current_trl_exports = {'DPOTrainer','GRPOTrainer','KTOTrainer','ORPOTrainer','PPOTrainer','RewardTrainer','RLOOTrainer','SFTTrainer'}
+          missing = sorted((current_trl_exports - {'SFTTrainer'}) - unsupported)
+          if 'RLOOTrainer' in missing:
+              print('REPRO PASS: RLOOTrainer is exported by current TRL but absent from MLX unsupported stub tuple')
+          else:
+              raise SystemExit(f'REPRO FAIL: expected RLOOTrainer missing from unsupported tuple, missing={missing}')
+          
+          # Reproduce reset_peak_memory_stats no-op in PR source.
+          if 'cuda.reset_peak_memory_stats = lambda device = None: None' in source:
+              print('REPRO PASS: torch.cuda.reset_peak_memory_stats is a no-op in the MLX shim')
+          else:
+              raise SystemExit('REPRO FAIL: reset_peak_memory_stats appears wired, finding no longer reproduces')
+          PY
+          python /tmp/pr6462_mlx_shim_repro.py
+
+      - name: "Repro torch-free chat template import path"
+        shell: bash
+        run: |
+          cat > /tmp/pr6462_chat_template_repro.py <<'PY'
+          from pathlib import Path
+          import ast
+          
+          chat_source = Path('unsloth/chat_templates.py').read_text()
+          zoo_url = 'https://raw.githubusercontent.com/unslothai/unsloth-zoo/925f493a0f82c21623f57930803f95219182fb2b/unsloth_zoo/tokenizer_utils.py'
+          
+          # Local PR side: MLX defaults use_zoo_tokenizer_patch to true and imports zoo tokenizer_utils.
+          if 'if use_zoo_tokenizer_patch is None:\n        use_zoo_tokenizer_patch = is_mlx_backend' not in chat_source:
+              raise SystemExit('REPRO FAIL: MLX default for zoo tokenizer patch not found')
+          if 'from unsloth_zoo.tokenizer_utils import patch_tokenizer' not in chat_source:
+              raise SystemExit('REPRO FAIL: zoo patch_tokenizer import not found')
+          print('REPRO PASS: PR MLX get_chat_template defaults to unsloth_zoo.tokenizer_utils.patch_tokenizer')
+          
+          # Companion zoo head side: tokenizer_utils imports torch at module top level.
+          import urllib.request
+          zoo_source = urllib.request.urlopen(zoo_url, timeout=20).read().decode()
+          tree = ast.parse(zoo_source)
+          top_imports = []
+          for node in tree.body:
+              if isinstance(node, ast.Import):
+                  top_imports.extend(alias.name for alias in node.names)
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  top_imports.append(node.module)
+          if 'torch' in top_imports:
+              print('REPRO PASS: companion unsloth_zoo.tokenizer_utils imports torch at module top level')
+          else:
+              raise SystemExit(f'REPRO FAIL: torch not top-level in zoo tokenizer_utils, imports={top_imports[:10]}')
+          PY
+          python /tmp/pr6462_chat_template_repro.py
+
