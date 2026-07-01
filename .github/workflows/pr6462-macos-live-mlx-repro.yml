@@ -133,7 +133,6 @@ jobs:
               assert getter is not None, 'MLX peak memory API missing'
               return int(getter())
           
-          # Start with a real reset so the assertion is scoped.
           resetter = getattr(mx, 'reset_peak_memory', None)
           if resetter is None and hasattr(mx, 'metal'):
               resetter = getattr(mx.metal, 'reset_peak_memory', None)
@@ -154,5 +153,40 @@ jobs:
               print('REPRO PASS: live torch.cuda.reset_peak_memory_stats is no-op for MLX peak memory')
           else:
               raise SystemExit('REPRO FAIL: reset_peak_memory_stats reset MLX peak memory')
+          PY
+
+      - name: "Live MLX with real TRL asserts RLOO trainer stubbing"
+        shell: bash
+        run: |
+          python -m pip install 'trl==0.24.0'
+          python - <<'PY'
+          import platform
+          assert platform.system() == 'Darwin' and platform.machine() == 'arm64'
+          import unsloth
+          import trl
+          print('unsloth DEVICE_TYPE', unsloth.DEVICE_TYPE)
+          print('real trl version', getattr(trl, '__version__', None))
+          print('real trl all contains RLOOTrainer', 'RLOOTrainer' in getattr(trl, '__all__', ()))
+          assert unsloth.DEVICE_TYPE == 'mlx'
+          assert 'RLOOTrainer' in getattr(trl, '__all__', ()), 'current TRL no longer exports RLOOTrainer'
+          try:
+              from trl import RLOOTrainer
+          except Exception as exc:
+              print('real TRL RLOO import raised', type(exc).__name__, str(exc).splitlines()[0])
+              raise
+          print('real TRL RLOOTrainer object', RLOOTrainer)
+          if getattr(RLOOTrainer, '_unsloth_mlx_unsupported', False):
+              raise SystemExit('REPRO FAIL: RLOOTrainer is now a clear unsupported MLX stub')
+          print('REPRO PASS: live MLX with real TRL leaves RLOOTrainer unstubbed')
+          try:
+              RLOOTrainer(model=None, args=None)
+          except NotImplementedError as exc:
+              if 'not yet supported on the MLX' in str(exc):
+                  raise SystemExit('REPRO FAIL: instantiating RLOOTrainer now gives clear MLX unsupported error')
+              print('real RLOOTrainer NotImplementedError', str(exc).splitlines()[0])
+          except Exception as exc:
+              print('REPRO PASS: live real TRL RLOOTrainer instantiation fails outside clear MLX unsupported stub:', type(exc).__name__, str(exc).splitlines()[0])
+          else:
+              print('REPRO PASS: live real TRL RLOOTrainer instantiated, proving it escaped MLX unsupported stub')
           PY
 
