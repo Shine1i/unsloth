@@ -44,7 +44,7 @@ jobs:
               print('spec', name, bool(spec), getattr(spec, 'origin', None) if spec else None)
           assert importlib.util.find_spec('mlx') is not None
           assert importlib.util.find_spec('torch') is None, 'no-torch phase unexpectedly has torch installed'
-          print('REPRO SETUP PASS: real MLX stack installed without torch')
+          print('REPRO SETUP PASS: real macos-14-arm64 MLX stack installed without torch')
           PY
 
       - name: "Live no-torch MLX import and public shim assertions"
@@ -53,7 +53,6 @@ jobs:
           python - <<'PY'
           import importlib.util
           import platform
-          import sys
           
           assert platform.system() == 'Darwin'
           assert platform.machine() == 'arm64'
@@ -66,8 +65,7 @@ jobs:
           
           import trl
           print('trl version', getattr(trl, '__version__', None))
-          print('trl has RLOOTrainer attr in vars', 'RLOOTrainer' in vars(trl))
-          print('trl all contains RLOOTrainer', 'RLOOTrainer' in getattr(trl, '__all__', ()))
+          print('trl all', getattr(trl, '__all__', None))
           assert trl.SFTTrainer is unsloth.UnslothTrainer
           assert issubclass(trl.SFTConfig, unsloth.UnslothTrainingArguments)
           assert trl.SFTConfig is not unsloth.UnslothTrainingArguments
@@ -77,12 +75,13 @@ jobs:
               from trl import RLOOTrainer
           except Exception as exc:
               print('RLOO import raised', type(exc).__name__, str(exc).splitlines()[0])
-              # In torch-free MLX this is still a bad shape unless it is the clear MLX unsupported stub.
-              assert 'not yet supported on the MLX' in str(exc), 'RLOOTrainer did not get clear MLX unsupported error'
+              assert isinstance(exc, ImportError), type(exc).__name__
+              assert 'not yet supported on the MLX' not in str(exc)
+              print('REPRO PASS: live no-torch MLX RLOOTrainer import gives generic ImportError, not clear unsupported-backend error')
           else:
               print('RLOOTrainer imported object', RLOOTrainer)
-              assert getattr(RLOOTrainer, '_unsloth_mlx_unsupported', False), 'RLOOTrainer escaped unsupported MLX stub'
-          print('REPRO PASS: RLOOTrainer import path has clear MLX unsupported behavior')
+              assert not getattr(RLOOTrainer, '_unsloth_mlx_unsupported', False), 'finding no longer reproduces: RLOOTrainer is clear stub'
+              print('REPRO PASS: live no-torch MLX RLOOTrainer escaped unsupported stub')
           PY
 
       - name: "Live no-torch get_chat_template assertion"
@@ -127,16 +126,30 @@ jobs:
           assert platform.system() == 'Darwin' and platform.machine() == 'arm64'
           assert unsloth.DEVICE_TYPE == 'mlx'
           
-          # Create a real MLX allocation and evaluate so peak memory is non-zero.
+          def peak_memory():
+              getter = getattr(mx, 'get_peak_memory', None)
+              if getter is None and hasattr(mx, 'metal'):
+                  getter = getattr(mx.metal, 'get_peak_memory', None)
+              assert getter is not None, 'MLX peak memory API missing'
+              return int(getter())
+          
+          # Start with a real reset so the assertion is scoped.
+          resetter = getattr(mx, 'reset_peak_memory', None)
+          if resetter is None and hasattr(mx, 'metal'):
+              resetter = getattr(mx.metal, 'reset_peak_memory', None)
+          assert resetter is not None, 'MLX reset peak memory API missing'
+          resetter()
+          print('peak_after_real_mlx_reset', peak_memory())
+          
           a = mx.ones((2048, 2048))
           mx.eval(a)
-          peak_before = mx.get_peak_memory() if hasattr(mx, 'get_peak_memory') else mx.metal.get_peak_memory()
-          print('peak_before', peak_before)
+          peak_before = peak_memory()
+          print('peak_before_torch_cuda_reset', peak_before)
           assert peak_before > 0, 'expected real MLX peak memory after allocation'
           
           torch.cuda.reset_peak_memory_stats()
-          peak_after = mx.get_peak_memory() if hasattr(mx, 'get_peak_memory') else mx.metal.get_peak_memory()
-          print('peak_after_reset', peak_after)
+          peak_after = peak_memory()
+          print('peak_after_torch_cuda_reset', peak_after)
           if peak_after > 0:
               print('REPRO PASS: live torch.cuda.reset_peak_memory_stats is no-op for MLX peak memory')
           else:
