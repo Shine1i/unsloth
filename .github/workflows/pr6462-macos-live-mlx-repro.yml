@@ -1,0 +1,145 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6462 macOS Live MLX Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6462-findings-repro-ci*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "macos-14"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Install real MLX no-torch environment"
+        shell: bash
+        run: |
+          python - <<'PY'
+          import platform
+          print('platform', platform.system(), platform.machine())
+          assert platform.system() == 'Darwin', platform.system()
+          assert platform.machine() == 'arm64', platform.machine()
+          PY
+          python -m pip install --upgrade pip
+          python -m pip install 'unsloth_zoo @ git+https://github.com/Lyxot/unsloth-zoo@mlx/trainer-api'
+          python -m pip install -e . --no-deps
+          python - <<'PY'
+          import importlib.util
+          for name in ['mlx', 'mlx_lm', 'mlx_vlm', 'unsloth_zoo']:
+              spec = importlib.util.find_spec(name)
+              print('spec', name, bool(spec), getattr(spec, 'origin', None) if spec else None)
+          assert importlib.util.find_spec('mlx') is not None
+          assert importlib.util.find_spec('torch') is None, 'no-torch phase unexpectedly has torch installed'
+          print('REPRO SETUP PASS: real MLX stack installed without torch')
+          PY
+
+      - name: "Live no-torch MLX import and public shim assertions"
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import platform
+          import sys
+          
+          assert platform.system() == 'Darwin'
+          assert platform.machine() == 'arm64'
+          assert importlib.util.find_spec('torch') is None, 'torch must be absent for this assertion'
+          
+          import unsloth
+          print('unsloth DEVICE_TYPE', getattr(unsloth, 'DEVICE_TYPE', None), 'IS_MLX', getattr(unsloth, '_IS_MLX', None))
+          assert unsloth.DEVICE_TYPE == 'mlx'
+          assert unsloth._IS_MLX is True
+          
+          import trl
+          print('trl version', getattr(trl, '__version__', None))
+          print('trl has RLOOTrainer attr in vars', 'RLOOTrainer' in vars(trl))
+          print('trl all contains RLOOTrainer', 'RLOOTrainer' in getattr(trl, '__all__', ()))
+          assert trl.SFTTrainer is unsloth.UnslothTrainer
+          assert issubclass(trl.SFTConfig, unsloth.UnslothTrainingArguments)
+          assert trl.SFTConfig is not unsloth.UnslothTrainingArguments
+          print('REPRO PASS: live MLX trl.SFTConfig is subclass, not identical to public args class')
+          
+          try:
+              from trl import RLOOTrainer
+          except Exception as exc:
+              print('RLOO import raised', type(exc).__name__, str(exc).splitlines()[0])
+              # In torch-free MLX this is still a bad shape unless it is the clear MLX unsupported stub.
+              assert 'not yet supported on the MLX' in str(exc), 'RLOOTrainer did not get clear MLX unsupported error'
+          else:
+              print('RLOOTrainer imported object', RLOOTrainer)
+              assert getattr(RLOOTrainer, '_unsloth_mlx_unsupported', False), 'RLOOTrainer escaped unsupported MLX stub'
+          print('REPRO PASS: RLOOTrainer import path has clear MLX unsupported behavior')
+          PY
+
+      - name: "Live no-torch get_chat_template assertion"
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib.util
+          assert importlib.util.find_spec('torch') is None, 'torch must be absent for this assertion'
+          import unsloth
+          from unsloth.chat_templates import get_chat_template
+          
+          class Tokenizer:
+              is_fast = True
+              padding_side = 'right'
+              eos_token = '<eos>'
+              bos_token = '<bos>'
+              unk_token = '<unk>'
+              pad_token = '<pad>'
+              added_tokens_decoder = {}
+          
+          try:
+              tok = get_chat_template(Tokenizer(), chat_template=('{{ messages }}', '<eos>'))
+          except Exception as exc:
+              print('get_chat_template raised', type(exc).__name__, str(exc).splitlines()[0])
+              assert isinstance(exc, ModuleNotFoundError) and getattr(exc, 'name', None) == 'torch', 'unexpected failure shape'
+              print('REPRO PASS: live no-torch MLX get_chat_template imports torch-backed zoo tokenizer_utils')
+          else:
+              print('get_chat_template returned', tok)
+              raise SystemExit('REPRO FAIL: expected torch-free get_chat_template to fail on current PR')
+          PY
+
+      - name: "Install torch and assert live MLX CUDA memory reset shim"
+        shell: bash
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple 'torch==2.10.0'
+          python - <<'PY'
+          import platform
+          import unsloth
+          import torch
+          import mlx.core as mx
+          
+          assert platform.system() == 'Darwin' and platform.machine() == 'arm64'
+          assert unsloth.DEVICE_TYPE == 'mlx'
+          
+          # Create a real MLX allocation and evaluate so peak memory is non-zero.
+          a = mx.ones((2048, 2048))
+          mx.eval(a)
+          peak_before = mx.get_peak_memory() if hasattr(mx, 'get_peak_memory') else mx.metal.get_peak_memory()
+          print('peak_before', peak_before)
+          assert peak_before > 0, 'expected real MLX peak memory after allocation'
+          
+          torch.cuda.reset_peak_memory_stats()
+          peak_after = mx.get_peak_memory() if hasattr(mx, 'get_peak_memory') else mx.metal.get_peak_memory()
+          print('peak_after_reset', peak_after)
+          if peak_after > 0:
+              print('REPRO PASS: live torch.cuda.reset_peak_memory_stats is no-op for MLX peak memory')
+          else:
+              raise SystemExit('REPRO FAIL: reset_peak_memory_stats reset MLX peak memory')
+          PY
+
