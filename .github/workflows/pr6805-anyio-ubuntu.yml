@@ -1,0 +1,88 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6805 AnyIO Linux Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6805-anyio-repair-repro-ci-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.13"
+
+      - name: "Live Python repair downgrades AnyIO"
+        shell: bash
+        run: |
+          python -m venv .repro-venv
+          . .repro-venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install --force-reinstall anyio==4.14.0
+          PYTHONPATH=$GITHUB_WORKSPACE/studio python - <<'PY'
+          from importlib.metadata import version
+          import install_python_stack as ips
+          print('before_anyio=' + version('anyio'))
+          ips.USE_UV = False
+          ips.VERBOSE = True
+          ips._repair_bad_anyio()
+          after = version('anyio')
+          print('after_anyio=' + after)
+          major, minor = [int(part) for part in after.split('.')[:2]]
+          if (major, minor) >= (4, 14):
+              raise SystemExit('FAIL: anyio repair did not downgrade below 4.14')
+          print('PASS: python repair downgraded anyio below 4.14')
+          PY
+
+      - name: "setup.sh fast path forces repair only for bad AnyIO"
+        shell: bash
+        run: |
+          . .repro-venv/bin/activate
+          VENV_DIR=.repro-venv
+          anyio_bad() {
+            "$VENV_DIR/bin/python" - <<'PY' 2>/dev/null
+          import re, sys
+          from importlib.metadata import version, PackageNotFoundError
+          try:
+              parts = version('anyio').split('.')
+              major = int(parts[0])
+              minor = int(re.sub(r'[^0-9].*', '', parts[1])) if len(parts) > 1 else 0
+          except (PackageNotFoundError, ValueError, IndexError):
+              sys.exit(1)
+          sys.exit(0 if (major, minor) >= (4, 14) else 1)
+          PY
+          }
+          python -m pip install --quiet --force-reinstall anyio==4.14.0
+          _SKIP_PYTHON_DEPS=true
+          if anyio_bad; then
+            echo 'anyio >=4.14 found (#6483) -- forcing dependency pass to repair...'
+            _SKIP_PYTHON_DEPS=false
+          fi
+          if [ "$_SKIP_PYTHON_DEPS" != false ]; then
+            echo 'FAIL: bad anyio did not force setup.sh dependency pass'
+            exit 1
+          fi
+          python -m pip install --quiet --force-reinstall anyio==4.13.0
+          _SKIP_PYTHON_DEPS=true
+          if anyio_bad; then
+            _SKIP_PYTHON_DEPS=false
+          fi
+          if [ "$_SKIP_PYTHON_DEPS" != true ]; then
+            echo 'FAIL: good anyio should keep setup.sh fast path'
+            exit 1
+          fi
+          echo 'PASS: setup.sh fast path gate distinguishes bad and good anyio'
+

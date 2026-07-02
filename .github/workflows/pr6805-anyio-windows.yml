@@ -1,0 +1,81 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6805 AnyIO Windows Repro"
+
+on:
+  push:
+    branches:
+      - "pr-6805-anyio-repair-repro-ci-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "windows-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Live Python repair downgrades AnyIO"
+        shell: pwsh
+        run: |
+          python -m venv .repro-venv
+          $py = Join-Path $PWD '.repro-venv\Scripts\python.exe'
+          & $py -m pip install --upgrade pip
+          & $py -m pip install --force-reinstall anyio==4.14.0
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'studio'
+          & $py -c @'
+          from importlib.metadata import version
+          import install_python_stack as ips
+          print('before_anyio=' + version('anyio'))
+          ips.USE_UV = False
+          ips.VERBOSE = True
+          ips._repair_bad_anyio()
+          after = version('anyio')
+          print('after_anyio=' + after)
+          major, minor = [int(part) for part in after.split('.')[:2]]
+          if (major, minor) >= (4, 14):
+              raise SystemExit('FAIL: anyio repair did not downgrade below 4.14')
+          print('PASS: python repair downgraded anyio below 4.14')
+          '@
+
+      - name: "setup.ps1 fast path forces repair only for bad AnyIO"
+        shell: pwsh
+        run: |
+          $py = Join-Path $PWD '.repro-venv\Scripts\python.exe'
+          function Test-AnyioBad {
+              & $py -c @'
+          import re, sys
+          from importlib.metadata import version, PackageNotFoundError
+          try:
+              parts = version('anyio').split('.')
+              major = int(parts[0])
+              minor = int(re.sub(r'[^0-9].*', '', parts[1])) if len(parts) > 1 else 0
+          except (PackageNotFoundError, ValueError, IndexError):
+              sys.exit(1)
+          sys.exit(0 if (major, minor) >= (4, 14) else 1)
+          '@ 2>$null
+              return $LASTEXITCODE -eq 0
+          }
+          & $py -m pip install --quiet --force-reinstall anyio==4.14.0
+          $SkipPythonDeps = $true
+          if (Test-AnyioBad) {
+              Write-Host 'anyio >=4.14 found (#6483) -- forcing dependency pass to repair...'
+              $SkipPythonDeps = $false
+          }
+          if ($SkipPythonDeps) { throw 'FAIL: bad anyio did not force setup.ps1 dependency pass' }
+          & $py -m pip install --quiet --force-reinstall anyio==4.13.0
+          $SkipPythonDeps = $true
+          if (Test-AnyioBad) { $SkipPythonDeps = $false }
+          if (-not $SkipPythonDeps) { throw 'FAIL: good anyio should keep setup.ps1 fast path' }
+          Write-Host 'PASS: setup.ps1 fast path gate distinguishes bad and good anyio'
+
