@@ -78,4 +78,4 @@ jobs:
           if (Test-AnyioBad) { $SkipPythonDeps = $false }
           if (-not $SkipPythonDeps) { throw 'FAIL: good anyio should keep setup.ps1 fast path' }
           Write-Host 'PASS: setup.ps1 fast path gate distinguishes bad and good anyio'
-
+          exit 0
