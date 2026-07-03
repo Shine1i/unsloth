@@ -1,0 +1,150 @@
+# Disposable workflow added by Mimir for PR review validation.
+# Runs focused PR/combined-branch tests on a real GitHub-hosted Apple Silicon runner.
+name: Mimir PR Review macOS Matrix
+
+on:
+  push:
+    branches:
+      - 'mimir-pr-review-macos-*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    name: ${{ matrix.name }}
+    runs-on: macos-14
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - name: studio-combo-6782-6783-6804
+            mode: merge
+            prs: '6782 6783 6804'
+            tests: 'studio/backend/tests/test_presence_penalty.py studio/backend/tests/test_orchestrator_unload_cancel.py studio/backend/tests/test_chat_eos_template_refresh.py studio/backend/tests/test_chat_turn_end_eos.py'
+            need_mlx: 'true'
+          - name: tool-current-combo-6807-6836
+            mode: merge
+            prs: '6807 6836'
+            tests: 'studio/backend/tests/test_chat_template_tool_arguments.py studio/backend/tests/test_safetensors_toolcall_wiring.py'
+            need_mlx: 'false'
+          - name: tool-pr-5620
+            mode: pr
+            pr: '5620'
+            tests: 'studio/backend/tests/test_gemma_tool_parse_edge_cases.py studio/backend/tests/test_llama_cpp_tool_loop.py studio/backend/tests/test_responses_tool_passthrough.py studio/backend/tests/test_safetensors_capability_advertise.py studio/backend/tests/test_safetensors_reasoning_stream.py studio/backend/tests/test_safetensors_tool_loop.py studio/backend/tests/test_tool_call_parser_strict.py studio/backend/tests/test_tool_xml_strip.py'
+            need_mlx: 'false'
+          - name: tool-pr-5624-stacked
+            mode: pr
+            pr: '5624'
+            tests: 'studio/backend/tests/test_gemma_tool_parse_edge_cases.py studio/backend/tests/test_llama_cpp_tool_loop.py studio/backend/tests/test_mcp_servers.py studio/backend/tests/test_mlx_inference_backend.py studio/backend/tests/test_pr5624_regressions.py studio/backend/tests/test_safetensors_capability_advertise.py studio/backend/tests/test_safetensors_tool_loop.py studio/backend/tests/test_tool_call_parser_strict.py studio/backend/tests/test_tool_xml_strip.py'
+            need_mlx: 'false'
+          - name: tool-pr-5704
+            mode: pr
+            pr: '5704'
+            tests: 'studio/backend/tests/test_anthropic_messages.py studio/backend/tests/test_gemma_tool_parse_edge_cases.py studio/backend/tests/test_llama_cpp_tool_loop.py studio/backend/tests/test_responses_tool_passthrough.py studio/backend/tests/test_safetensors_capability_advertise.py studio/backend/tests/test_safetensors_reasoning_stream.py studio/backend/tests/test_safetensors_tool_loop.py studio/backend/tests/test_tool_call_parser_strict.py studio/backend/tests/test_tool_xml_strip.py'
+            need_mlx: 'false'
+          - name: tool-pr-6611
+            mode: pr
+            pr: '6611'
+            tests: 'studio/backend/tests/test_gemma_tool_parse_edge_cases.py studio/backend/tests/test_tool_strip_guard.py'
+            need_mlx: 'false'
+          - name: passthrough-pr-6801
+            mode: pr
+            pr: '6801'
+            tests: 'studio/backend/tests/test_passthrough_healing.py studio/backend/tests/test_responses_tool_passthrough.py studio/backend/tests/test_tool_call_parser_strict.py'
+            need_mlx: 'false'
+          - name: mlx-combo-6803-zoo-845
+            mode: mlx_combo
+            pr: '6803'
+            tests: 'studio/backend/tests/test_mlx_repair.py'
+            need_mlx: 'true'
+    steps:
+      - name: Harden runner (audit)
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450
+        with:
+          egress-policy: audit
+
+      - name: Check out Unsloth main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: unslothai/unsloth
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select PR head or local merge combo
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name 'Mimir Review CI'
+          git config user.email 'mimir-review-ci@example.invalid'
+          if [ '${{ matrix.mode }}' = 'pr' ] || [ '${{ matrix.mode }}' = 'mlx_combo' ]; then
+            git fetch --no-tags origin 'pull/${{ matrix.pr }}/head:pr-${{ matrix.pr }}'
+            git checkout 'pr-${{ matrix.pr }}'
+          else
+            for pr in ${{ matrix.prs }}; do
+              git fetch --no-tags origin "pull/${pr}/head:pr-${pr}"
+              git merge --no-edit --no-ff "pr-${pr}"
+            done
+          fi
+          git log -1 --oneline
+          git status --short
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install focused test dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          pip install \
+            pytest==9.0.3 \
+            packaging \
+            pydantic \
+            fastapi \
+            httpx \
+            uvicorn \
+            structlog \
+            pyyaml \
+            rich \
+            typer \
+            numpy \
+            transformers==4.57.6 \
+            torch==2.10.0
+          if [ '${{ matrix.need_mlx }}' = 'true' ]; then
+            pip install 'mlx>=0.22.0' 'mlx-lm>=0.22.0,!=0.31.3' 'mlx-vlm>=0.4.4'
+          fi
+
+      - name: Check out unsloth-zoo PR 845 for MLX combo
+        if: matrix.mode == 'mlx_combo'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: unslothai/unsloth-zoo
+          ref: refs/pull/845/head
+          path: unsloth-zoo-pr-845
+          persist-credentials: false
+
+      - name: Run focused tests
+        shell: bash
+        env:
+          PYTHONPATH: studio/backend
+          UNSLOTH_STUDIO_HOME: ${{ github.workspace }}/.studio-review-home
+          TOKENIZERS_PARALLELISM: 'false'
+        run: |
+          set -euxo pipefail
+          python -m pytest -q ${{ matrix.tests }}
+          if [ '${{ matrix.mode }}' = 'mlx_combo' ]; then
+            PYTHONPATH="${PWD}/unsloth-zoo-pr-845:${PWD}/unsloth-zoo-pr-845/tests:${PYTHONPATH}" \
+              python -m pytest -q unsloth-zoo-pr-845/tests/test_mlx_qk_norm_version_gap.py
+          fi
