@@ -124,6 +124,8 @@ jobs:
             typer \
             numpy \
             transformers==4.57.6 \
+            'peft>=0.18.0' \
+            'accelerate>=0.34.1' \
             torch==2.10.0
           # Provide unsloth_zoo package metadata for `import unsloth` while keeping
           # the checked-out PR code as source via PYTHONPATH where needed.
