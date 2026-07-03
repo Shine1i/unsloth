@@ -1,0 +1,99 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6786 fast_generate guard repro"
+
+on:
+  push:
+    branches:
+      - "pr-6786-fast-generate-guard-repro-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.11"
+
+      - name: "Show checkout context"
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          git log -1 --oneline
+          python --version
+
+      - name: "Install minimal test dependency"
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip pytest
+
+      - name: "Run focused slow guard test"
+        shell: bash
+        run: |
+          python -m py_compile unsloth/models/_utils.py tests/test_fast_generate_slow_guard.py
+          python -m pytest --collect-only -q tests/test_fast_generate_slow_guard.py
+          python -m pytest -q tests/test_fast_generate_slow_guard.py
+
+      - name: "Probe reported vLLM-only shapes"
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast, functools
+          from pathlib import Path
+          
+          src = Path('unsloth/models/_utils.py').read_text()
+          for node in ast.parse(src).body:
+              if isinstance(node, ast.FunctionDef) and node.name == 'make_fast_generate_wrapper':
+                  ns = {'functools': functools}
+                  exec(ast.get_source_segment(src, node), ns)
+                  make_fast_generate_wrapper = ns['make_fast_generate_wrapper']
+                  break
+          else:
+              raise SystemExit('make_fast_generate_wrapper not found')
+          
+          class _SamplingParams:
+              pass
+          _SamplingParams.__name__ = 'SamplingParams'
+          
+          called = {'n': 0}
+          def original_generate(*args, **kwargs):
+              called['n'] += 1
+              return 'delegated'
+          
+          w = make_fast_generate_wrapper(original_generate)
+          reject_cases = [
+              ('multimodal prompt dict', lambda: w({'prompt': 'hi', 'multi_modal_data': {'image': None}}), 'fast_inference=True'),
+              ('batched prompt dicts', lambda: w([{'prompt': 'hi'}]), 'fast_inference=True'),
+              ('token prompt dict', lambda: w({'prompt_token_ids': [1, 2, 3]}), 'fast_inference=True'),
+              ('prompt embeds dict', lambda: w({'prompt_embeds': [[0.0]]}), 'fast_inference=True'),
+              ('positional SamplingParams', lambda: w({'prompt': 'hi'}, _SamplingParams()), 'sampling_params'),
+              ('positional SamplingParams list', lambda: w({'prompt': 'hi'}, [_SamplingParams()]), 'sampling_params'),
+              ('prompts kwarg token ids', lambda: w(prompts=[1, 2, 3]), 'fast_inference=True'),
+              ('prompts kwarg None', lambda: w(prompts=None), 'fast_inference=True'),
+              ('prompt_token_ids kwarg', lambda: w(prompt_token_ids=[1, 2, 3]), 'fast_inference=True'),
+          ]
+          for name, fn, needle in reject_cases:
+              try:
+                  fn()
+              except ValueError as exc:
+                  assert needle in str(exc), (name, str(exc))
+                  print(f'PASS reject: {name}')
+              else:
+                  raise AssertionError(f'expected ValueError for {name}')
+          
+          assert w(input_ids='TOKENS', max_new_tokens=8) == 'delegated'
+          assert w([1, 2, 3], max_new_tokens=8) == 'delegated'
+          assert w([], max_new_tokens=8) == 'delegated'
+          print('PASS delegate: normal tokenized slow-mode calls')
+          PY
+
