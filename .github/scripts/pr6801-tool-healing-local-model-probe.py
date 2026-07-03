@@ -21,10 +21,11 @@ LOCAL_MODEL = "unsloth/Qwen3-1.7B-GGUF"
 LOCAL_GGUF_VARIANT = "UD-Q4_K_XL"
 LOCAL_MAX_SEQ_LENGTH = 1024
 LOCAL_PARALLEL = 1
-FIXTURE = '<tool_call>{"name":"lookup","arguments":{"q":"x"}}</tool_call>'
+FIXTURE = "<function=lookup><parameter=q>x</parameter></function>"
 PROMPT = (
-    "This is a protocol conformance test. Output exactly this single line and "
-    f"nothing else: {FIXTURE}"
+    "Output this literal XML snippet exactly, including the angle brackets. "
+    "Do not output JSON. Do not omit the function or parameter tags. Snippet: "
+    f"{FIXTURE}"
 )
 TOOL_SCHEMA = {
     "type": "object",
