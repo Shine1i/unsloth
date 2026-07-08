@@ -1414,7 +1414,10 @@ def openclaw(
         serve = serve,
         launch = launch,
     )
-    command = ["openclaw", *ctx.args]
+    openclaw_args = list(ctx.args)
+    if not openclaw_args or openclaw_args[0].startswith("-"):
+        openclaw_args = ["tui", "--local", *openclaw_args]
+    command = ["openclaw", *openclaw_args]
     install_hint = (
         "iwr -useb https://openclaw.ai/install.ps1 | iex"
         if os.name == "nt"
