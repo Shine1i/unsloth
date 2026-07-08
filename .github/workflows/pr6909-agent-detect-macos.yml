@@ -1,0 +1,90 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 6909 Agent Detection macOS"
+
+on:
+  push:
+    branches:
+      - "pr-6909-agent-detect-repro-ci-20260708120249"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "macos-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "22.17.1"
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Print versions"
+        shell: bash
+        run: |
+          python --version
+          node --version
+          npm --version
+
+      - name: "Backend/static focused tests"
+        shell: bash
+        run: |
+          python -m pip install -q pytest
+          PYTHONPATH=studio/backend python -m pytest -q studio/backend/tests/test_coding_agents.py tests/studio/test_chat_response_details_ui_contract.py
+
+      - name: "Frontend typecheck"
+        shell: bash
+        run: |
+          cd studio/frontend
+          npm ci
+          npm run typecheck
+
+      - name: "Positive coding-agent auto-pick probe"
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          const DEFAULT_AGENT = 'claude';
+          function normalizeHost(host) { const lower = host.toLowerCase(); return lower.startsWith('[') && lower.endsWith(']') ? lower.slice(1, -1) : lower; }
+          function isLoopbackHost(host) { if (host === 'localhost' || host === '::1') return true; const octets = host.split('.'); return octets.length === 4 && octets[0] === '127' && octets.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255); }
+          function resolveIsLoopbackBase(base) { try { return isLoopbackHost(normalizeHost(new URL(base).hostname)); } catch { return false; } }
+          function deriveAgent({detectedAgents, agent, manual=false, activeGgufVariant=null, activeNativePathToken=null, ggufContextLength=null}) { if (manual) return agent; if (detectedAgents.length === 0) return agent; const isGguf = activeGgufVariant != null || activeNativePathToken != null || ggufContextLength != null; const preferred = detectedAgents.find((a) => a !== 'codex' || isGguf); if (preferred) return preferred; if (agent === 'codex' && !isGguf) return DEFAULT_AGENT; return agent; }
+          const checks = [
+            ['LAN disabled', !resolveIsLoopbackBase('http://192.168.1.10:8888')],
+            ['Cloudflare disabled', !resolveIsLoopbackBase('https://example.trycloudflare.com')],
+            ['127 loopback enabled', resolveIsLoopbackBase('http://127.0.0.1:8888')],
+            ['codex-only non-GGUF resets', deriveAgent({detectedAgents:['codex'], agent:'codex'}) === 'claude'],
+            ['native GGUF permits codex', deriveAgent({detectedAgents:['codex'], agent:'claude', activeNativePathToken:'tok'}) === 'codex'],
+            ['manual pick survives', deriveAgent({detectedAgents:['codex'], agent:'pi', manual:true, activeGgufVariant:'Q4'}) === 'pi'],
+            ['non-GGUF skips codex for compatible fallback', deriveAgent({detectedAgents:['codex','opencode'], agent:'claude'}) === 'opencode'],
+          ];
+          let ok = true;
+          for (const [name, pass] of checks) { console.log(`${pass ? 'PASS' : 'FAIL'} ${name}`); ok &&= pass; }
+          process.exit(ok ? 0 : 1);
+          NODE
+
+      - name: "Negative repro: SSH/local-forward loopback still trusts backend PATH"
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          function normalizeHost(host) { const lower = host.toLowerCase(); return lower.startsWith('[') && lower.endsWith(']') ? lower.slice(1, -1) : lower; }
+          function isLoopbackHost(host) { if (host === 'localhost' || host === '::1') return true; const octets = host.split('.'); return octets.length === 4 && octets[0] === '127' && octets.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255); }
+          function resolveIsLoopbackBase(base) { try { return isLoopbackHost(normalizeHost(new URL(base).hostname)); } catch { return false; } }
+          const base = 'http://127.0.0.1:7777';
+          const trusted = resolveIsLoopbackBase(base);
+          console.log(`repro ssh/local-forward displayed base ${base} trusted_by_detection=${trusted}`);
+          if (trusted) {
+            console.error('FAIL: displayed loopback URL is not sufficient same-machine proof for SSH/local port forwards; backend PATH can be remote.');
+            process.exit(1);
+          }
+          NODE
+
