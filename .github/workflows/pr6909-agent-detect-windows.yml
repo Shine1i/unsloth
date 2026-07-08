@@ -40,6 +40,8 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install -q pytest
+
+          $env:PYTHONUTF8 = "1"
           $env:PYTHONPATH = "studio/backend"
           python -m pytest -q studio/backend/tests/test_coding_agents.py tests/studio/test_chat_response_details_ui_contract.py
 
