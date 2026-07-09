@@ -1,0 +1,206 @@
+# Disposable validation for unslothai/unsloth#7017. Do not keep long-term.
+name: PR 7017 Anthropic Messages E2E
+
+on:
+  push:
+    branches:
+      - 'pr-7017-*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  full-install-studio-messages:
+    name: Full install Studio /v1/messages thinking/null repro
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GGUF_REPO: unsloth/gemma-3-270m-it-GGUF
+      GGUF_VARIANT: UD-Q4_K_XL
+      GGUF_FILE: gemma-3-270m-it-UD-Q4_K_XL.gguf
+      STUDIO_PORT: '18917'
+      HF_HOME: ${{ github.workspace }}/hf-cache
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Linux deps for llama.cpp prebuilt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libssl-dev jq
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Restore HF_HOME for ${{ env.GGUF_REPO }}
+        id: cache-hf
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        continue-on-error: true
+        with:
+          path: hf-cache
+          key: ${{ runner.os }}-hf-${{ env.GGUF_REPO }}-${{ env.GGUF_VARIANT }}-v2
+
+      - name: Prime HF_HOME with the GGUF
+        id: prime-hf
+        if: steps.cache-hf.outputs.cache-hit != 'true' || steps.cache-hf.outcome != 'success'
+        env:
+          HF_TOKEN: ${{ github.event_name != 'pull_request' && secrets.HF_TOKEN || '' }}
+        run: |
+          python -m pip install --upgrade huggingface_hub
+          mkdir -p hf-cache
+          bash .github/scripts/hf-download-with-retry.sh "$GGUF_REPO" "$GGUF_FILE"
+          bash .github/scripts/hf-download-with-retry.sh ggml-org/models tinyllamas/stories260K.gguf
+
+      - name: Save HF_HOME for ${{ env.GGUF_REPO }}
+        if: always() && steps.prime-hf.outcome == 'success'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: hf-cache
+          key: ${{ runner.os }}-hf-${{ env.GGUF_REPO }}-${{ env.GGUF_VARIANT }}-v2
+
+      - name: Full install Studio (--local, --no-torch)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HF_TOKEN: ${{ github.event_name != 'pull_request' && secrets.HF_TOKEN || '' }}
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          bash install.sh --local --no-torch 2>&1 | tee logs/install.log
+
+      - name: Reset auth + boot Studio (API-only)
+        run: |
+          unsloth studio reset-password
+          mkdir -p logs
+          UNSLOTH_API_ONLY=1 unsloth studio -H 127.0.0.1 -p "$STUDIO_PORT" > logs/studio.log 2>&1 &
+          echo "STUDIO_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for /api/health, login, and load GGUF
+        run: |
+          for i in $(seq 1 180); do
+            if curl -fs "http://127.0.0.1:${STUDIO_PORT}/api/health" > /tmp/health.json; then
+              jq -e '.status == "healthy"' /tmp/health.json && break
+            fi
+            sleep 1
+          done
+          jq -e '.status == "healthy"' /tmp/health.json
+          OLD=$(cat ~/.unsloth/studio/auth/.bootstrap_password)
+          echo "::add-mask::$OLD"
+          TOKEN=$(curl -fs -X POST "http://127.0.0.1:${STUDIO_PORT}/api/auth/login" \
+            -H 'content-type: application/json' \
+            -d "{\"username\":\"unsloth\",\"password\":\"$OLD\"}" | jq -r .access_token)
+          [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "login failed"; exit 1; }
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          curl -fs -X POST "http://127.0.0.1:${STUDIO_PORT}/api/inference/load" \
+            -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+            --max-time 600 \
+            -d "{\"model_path\":\"$GGUF_REPO\",\"gguf_variant\":\"$GGUF_VARIANT\",\"is_lora\":false,\"max_seq_length\":2048}" \
+            | jq '{status, display_name, is_gguf, context_length}'
+
+      - name: Reproduce resumed Claude payload against live /v1/messages
+        env:
+          BASE_URL: http://127.0.0.1:18917
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          BASE = os.environ["BASE_URL"]
+          TOKEN = os.environ["TOKEN"]
+
+          def post(path, body):
+              req = urllib.request.Request(
+                  f"{BASE}{path}",
+                  data=json.dumps(body).encode(),
+                  method="POST",
+                  headers={
+                      "Authorization": f"Bearer {TOKEN}",
+                      "Content-Type": "application/json",
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=240) as resp:
+                  raw = resp.read().decode()
+                  return resp.status, json.loads(raw) if raw else None
+
+          resumed = {
+              "model": "default",
+              "max_tokens": 32,
+              "temperature": 0.0,
+              "seed": 3407,
+              "messages": [
+                  {"role": "user", "content": "Remember the keyword: PARIS."},
+                  {
+                      "role": "assistant",
+                      "content": [
+                          {"type": "thinking", "thinking": "SECRET_THINKING_SHOULD_NOT_LEAK", "signature": "sig"},
+                          {"type": "redacted_thinking", "data": "opaque"},
+                          {"type": "text", "text": "I will remember the keyword."},
+                      ],
+                  },
+                  {"role": "assistant", "content": None},
+                  {"role": "user", "content": "What keyword did I ask you to remember?"},
+              ],
+          }
+
+          status, count = post("/v1/messages/count_tokens", resumed)
+          assert status == 200, status
+          assert isinstance(count.get("input_tokens"), int) and count["input_tokens"] > 0, count
+          print(f"PASS count_tokens accepted thinking/redacted/null payload: {count}")
+
+          status, msg = post("/v1/messages", resumed)
+          assert status == 200, status
+          assert msg.get("type") == "message", msg
+          text = " ".join(block.get("text", "") for block in msg.get("content", []) if isinstance(block, dict))
+          assert text.strip(), msg
+          assert "SECRET_THINKING_SHOULD_NOT_LEAK" not in json.dumps(msg), msg
+          print("PASS /v1/messages accepted resumed payload and did not echo thinking marker")
+          print(json.dumps({"id": msg.get("id"), "stop_reason": msg.get("stop_reason"), "text_prefix": text[:160]}, indent=2))
+
+          bad_user = {
+              "model": "default",
+              "max_tokens": 8,
+              "messages": [{"role": "user", "content": [{"type": "document", "source": {}}]}],
+          }
+          try:
+              post("/v1/messages", bad_user)
+          except urllib.error.HTTPError as exc:
+              body = exc.read().decode(errors="replace")[:500]
+              assert exc.code in (400, 422), (exc.code, body)
+              print(f"PASS unsupported user block rejected with HTTP {exc.code}: {body[:180]}")
+          else:
+              raise AssertionError("unsupported user block unexpectedly succeeded")
+          PY
+
+      - name: Stop Studio
+        if: always()
+        run: |
+          kill "${STUDIO_PID}" 2>/dev/null || true
+          sleep 2
+          ss -tln | grep ":${STUDIO_PORT}" || true
+
+      - name: Upload logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pr7017-anthropic-e2e-logs
+          path: |
+            logs/install.log
+            logs/studio.log
+          retention-days: 7
