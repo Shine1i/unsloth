@@ -25,6 +25,7 @@ import {
 export interface SidebarItem {
   type: "single" | "compare";
   id: string;
+  threadIds: string[];
   title: string;
   createdAt: number;
   updatedAt: number;
@@ -55,12 +56,15 @@ export function groupThreads(
     if (t.pairId) {
       const existing = pairItems.get(t.pairId);
       if (existing) {
+        existing.threadIds.push(t.id);
+        existing.createdAt = Math.max(existing.createdAt, t.createdAt);
         existing.updatedAt = Math.max(existing.updatedAt, lastActivityAt(t));
         continue;
       }
       const item: SidebarItem = {
         type: "compare",
         id: t.pairId,
+        threadIds: [t.id],
         title: t.title,
         createdAt: t.createdAt,
         updatedAt: lastActivityAt(t),
@@ -72,6 +76,7 @@ export function groupThreads(
       items.push({
         type: "single",
         id: t.id,
+        threadIds: [t.id],
         title: t.title,
         createdAt: t.createdAt,
         updatedAt: lastActivityAt(t),
