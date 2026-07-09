@@ -98,12 +98,22 @@ jobs:
             sleep 1
           done
           jq -e '.status == "healthy"' /tmp/health.json
+          set -o pipefail
           OLD=$(cat ~/.unsloth/studio/auth/.bootstrap_password)
+          NEW="PR7017-$(python -c 'import secrets; print(secrets.token_urlsafe(12))')"
           echo "::add-mask::$OLD"
-          TOKEN=$(curl -fs -X POST "http://127.0.0.1:${STUDIO_PORT}/api/auth/login" \
+          echo "::add-mask::$NEW"
+          OLD_TOKEN=$(curl -fs -X POST "http://127.0.0.1:${STUDIO_PORT}/api/auth/login" \
             -H 'content-type: application/json' \
             -d "{\"username\":\"unsloth\",\"password\":\"$OLD\"}" | jq -r .access_token)
-          [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "login failed"; exit 1; }
+          [ -n "$OLD_TOKEN" ] && [ "$OLD_TOKEN" != "null" ] || { echo "bootstrap login failed"; exit 1; }
+          curl -fs -X POST "http://127.0.0.1:${STUDIO_PORT}/api/auth/change-password" \
+            -H "Authorization: Bearer $OLD_TOKEN" -H 'content-type: application/json' \
+            -d "{\"current_password\":\"$OLD\",\"new_password\":\"$NEW\"}" > /dev/null
+          TOKEN=$(curl -fs -X POST "http://127.0.0.1:${STUDIO_PORT}/api/auth/login" \
+            -H 'content-type: application/json' \
+            -d "{\"username\":\"unsloth\",\"password\":\"$NEW\"}" | jq -r .access_token)
+          [ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "rotated login failed"; exit 1; }
           echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
           curl -fs -X POST "http://127.0.0.1:${STUDIO_PORT}/api/inference/load" \
             -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
