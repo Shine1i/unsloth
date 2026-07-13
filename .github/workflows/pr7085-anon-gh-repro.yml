@@ -1,0 +1,105 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR #7085 anonymous GH rate-limit repro"
+
+on:
+  push:
+    branches:
+      - "pr-7085-gh-anon-repro-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Explicitly blank for this disposable anonymous-API experiment.
+env:
+  GH_TOKEN: ""
+  GITHUB_TOKEN: ""
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Verify GH credentials are absent"
+        shell: bash
+        run: |
+          set -eu
+          for name in GH_TOKEN GITHUB_TOKEN; do
+            if [ -n "${!name-}" ]; then
+              echo "FAIL: $name is set" >&2
+              exit 1
+            fi
+          done
+          printf '%s\n' 'PASS: GH_TOKEN and GITHUB_TOKEN are unset'
+
+      - name: "Probe anonymous GitHub API rate limits"
+        shell: bash
+        run: |
+          env -u GH_TOKEN -u GITHUB_TOKEN python - <<'PY'
+          import json
+          import urllib.error
+          import urllib.request
+          
+          def probe(url):
+              req = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'unsloth-pr-7085-anon-repro'})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      status = response.status
+                      headers = response.headers
+                      payload = response.read()
+              except urllib.error.HTTPError as exc:
+                  status = exc.code
+                  headers = exc.headers
+                  payload = exc.read()
+              remaining = headers.get('X-RateLimit-Remaining', 'unknown')
+              limit = headers.get('X-RateLimit-Limit', 'unknown')
+              resource = headers.get('X-RateLimit-Resource', 'unknown')
+              print(f'ANON url={url} status={status} resource={resource} remaining={remaining}/{limit}')
+              if status in (403, 429):
+                  text = payload.decode('utf-8', 'replace').lower()
+                  if 'rate limit' in text or 'abuse' in text or 'secondary' in text:
+                      raise SystemExit(f'FAIL: anonymous GitHub rate limit response from {url}')
+              if status >= 400:
+                  raise SystemExit(f'FAIL: unexpected HTTP {status} from {url}')
+              return json.loads(payload)
+          
+          probe('https://api.github.com/rate_limit')
+          releases = probe('https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30')
+          if not isinstance(releases, list) or not releases:
+              raise SystemExit('FAIL: release endpoint returned no release list')
+          print(f'PASS: anonymous release request returned {len(releases)} releases')
+          PY
+
+      - name: "Exercise Studio freshness request without GH credentials"
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check -q structlog
+          env -u GH_TOKEN -u GITHUB_TOKEN PYTHONPATH=studio/backend python - <<'PY'
+          import os
+          from utils.llama_cpp_freshness import _fetch_latest_release_tag
+          
+          assert not os.environ.get('GH_TOKEN')
+          assert not os.environ.get('GITHUB_TOKEN')
+          tag = _fetch_latest_release_tag('ggml-org/llama.cpp', timeout=30)
+          if not tag:
+              raise SystemExit('FAIL: Studio freshness request did not return a release tag')
+          print(f'PASS: Studio freshness request completed anonymously, latest_tag={tag}')
+          PY
+
+      - name: "Run PR syntax and focused regression checks"
+        shell: bash
+        run: |
+          python -m py_compile studio/backend/core/training/worker.py studio/backend/main.py studio/backend/run.py
+          python -m pip install --disable-pip-version-check -q pytest
+          python -m pytest -q tests/test_windows_rocm_bnb_version.py
+
