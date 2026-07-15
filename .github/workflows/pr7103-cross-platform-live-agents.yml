@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install focused test dependencies
-        run: python -m pip install pytest typer requests pyyaml packaging
+        run: python -m pip install pytest typer requests pydantic pyyaml nest-asyncio packaging
       - name: Run complete unsloth start suite
         env:
           UNSLOTH_NO_TORCH: '1'
@@ -235,7 +235,10 @@ jobs:
           curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
           apt-get install -y nodejs
           python3 -m venv .pr7103-venv
-          .pr7103-venv/bin/pip install huggingface_hub pyyaml pytest typer requests packaging
+          .pr7103-venv/bin/pip install huggingface_hub pyyaml pytest typer requests pydantic nest-asyncio packaging
+          export GGUF_REPO='unsloth/gemma-4-E2B-it-GGUF'
+          export GGUF_FILE='gemma-4-E2B-it-UD-Q4_K_XL.gguf'
+
           .pr7103-venv/bin/python - <<'PY'
           import os
           from huggingface_hub import hf_hub_download
@@ -249,6 +252,10 @@ jobs:
         shell: wsl-bash {0}
         run: |
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+
+          export GGUF_FILE='gemma-4-E2B-it-UD-Q4_K_XL.gguf'
+          export STUDIO_PORT='18971'
+          export AGENT_INVOKE_TIMEOUT='900'
           export GITHUB_ENV=/tmp/pr7103-github-env
           : > "$GITHUB_ENV"
           export UNSLOTH_NO_TORCH=1

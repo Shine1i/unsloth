@@ -113,6 +113,7 @@ def command_for(agent: str, base: list[str], root: Path) -> list[str]:
         model = os.environ["UNSLOTH_MODEL_ID"]
         return base + [
             "--persist",
+            "--",
             "agent",
             "--local",
             "--agent",
@@ -153,8 +154,13 @@ def main() -> int:
             prepare_relocated_config(agent, base, logs)
             work = root / "agent-workdir" / agent
             work.mkdir(parents=True, exist_ok=True)
-            result = run(command_for(agent, base, root), timeout=timeout, cwd=work)
+            command = command_for(agent, base, root)
+            result = run(command, timeout=timeout, cwd=work)
             output = redact(result.stdout)
+            if result.returncode:
+                print(f"Retrying {agent} once after exit {result.returncode}")
+                result = run(command, timeout=timeout, cwd=work)
+                output += "\n===== RETRY =====\n" + redact(result.stdout)
             (logs / f"{agent}.txt").write_text(output, encoding="utf-8")
             print(output[-4000:])
             lowered = output.lower()
