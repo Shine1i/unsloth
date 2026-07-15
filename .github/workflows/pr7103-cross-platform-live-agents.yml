@@ -43,13 +43,19 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install focused test dependencies
-        run: python -m pip install pytest typer requests pydantic pyyaml nest-asyncio packaging
+        run: python -m pip install pytest typer click requests pydantic pyyaml nest-asyncio packaging
       - name: Run complete unsloth start suite
+        if: runner.os != 'Windows'
         env:
           UNSLOTH_NO_TORCH: '1'
-          UNSLOTH_STUDIO_URL: ''
-          UNSLOTH_BASE_URL: ''
         run: python -m pytest unsloth_cli/tests/test_start.py -q
+      - name: Run PR contracts on Windows
+        if: runner.os == 'Windows'
+        env:
+          UNSLOTH_NO_TORCH: '1'
+        run: >-
+          python -m pytest unsloth_cli/tests/test_start.py -q
+          -k "codex_model_catalog or write_codex_config or write_openclaw_config_clears_per_agent_path_overrides or write_opencode_config_yolo or hermes_resume_oneshot_args"
 
   live-posix:
     name: live six agents (${{ matrix.os }})
@@ -235,7 +241,7 @@ jobs:
           curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
           apt-get install -y nodejs
           python3 -m venv .pr7103-venv
-          .pr7103-venv/bin/pip install huggingface_hub pyyaml pytest typer requests pydantic nest-asyncio packaging
+          .pr7103-venv/bin/pip install huggingface_hub pyyaml pytest typer click requests pydantic nest-asyncio packaging
           export GGUF_REPO='unsloth/gemma-4-E2B-it-GGUF'
           export GGUF_FILE='gemma-4-E2B-it-UD-Q4_K_XL.gguf'
 

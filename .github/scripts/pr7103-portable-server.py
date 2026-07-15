@@ -56,6 +56,8 @@ def main() -> int:
         "--no-cloudflare",
         "--model",
         model_file,
+        "--max-seq-length",
+        "8192",
         "--seed",
         "3407",
         "--temp",

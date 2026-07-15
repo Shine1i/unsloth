@@ -25,6 +25,9 @@ ERROR_MARKERS = (
     "unauthorized",
     "invalid api key",
     "authentication failed",
+    "context overflow",
+    "message too long",
+    "response.failed",
 )
 
 
