@@ -1,0 +1,302 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved.
+
+name: PR 7103 cross-platform live agents
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/scripts/pr7103-*'
+      - '.github/workflows/pr7103-cross-platform-live-agents.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: pr-7103-cross-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GGUF_REPO: unsloth/gemma-4-E2B-it-GGUF
+  GGUF_FILE: gemma-4-E2B-it-UD-Q4_K_XL.gguf
+  STUDIO_PORT: '18971'
+  AGENT_INVOKE_TIMEOUT: '900'
+  PYTHONIOENCODING: utf-8
+  PYTHONUTF8: '1'
+
+  COLUMNS: '160'
+
+jobs:
+  unit-contracts:
+    name: start.py contracts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Install focused test dependencies
+        run: python -m pip install pytest typer click requests pydantic pyyaml nest-asyncio packaging
+      - name: Run complete unsloth start suite
+        if: runner.os != 'Windows'
+        env:
+          UNSLOTH_NO_TORCH: '1'
+        run: python -m pytest unsloth_cli/tests/test_start.py -q
+      - name: Run PR contracts on Windows
+        if: runner.os == 'Windows'
+        env:
+          UNSLOTH_NO_TORCH: '1'
+        run: >-
+          python -m pytest unsloth_cli/tests/test_start.py -q
+          -k "codex_model_catalog or write_codex_config or write_openclaw_config_clears_per_agent_path_overrides or write_opencode_config_yolo or hermes_resume_oneshot_args"
+
+  live-posix:
+    name: live six agents (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Install live-probe dependencies
+        run: python -m pip install huggingface_hub pyyaml
+      - name: Restore real GGUF
+        id: restore-model
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        continue-on-error: true
+        with:
+          path: gguf-cache
+          key: pr7103-${{ runner.os }}-${{ env.GGUF_FILE }}-v1
+      - name: Download real GGUF
+        if: steps.restore-model.outputs.cache-hit != 'true' || steps.restore-model.outcome != 'success'
+        run: |
+          python -m pip install huggingface_hub
+          python - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          hf_hub_download(os.environ["GGUF_REPO"], os.environ["GGUF_FILE"], local_dir = "gguf-cache")
+          PY
+      - name: Save real GGUF
+        if: always() && steps.restore-model.outputs.cache-hit != 'true' && hashFiles('gguf-cache/*.gguf') != ''
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: gguf-cache
+          key: pr7103-${{ runner.os }}-${{ env.GGUF_FILE }}-v1
+      - name: Install Studio from exact PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p logs
+          bash install.sh --local --no-torch 2>&1 | tee logs/install-studio.log
+      - name: Install all six native agent CLIs
+        run: |
+          for agent in claude codex hermes openclaw opencode pi; do
+            bash .github/scripts/agent-guides-install.sh "$agent"
+          done
+      - name: Start real Studio GGUF server
+        run: >-
+          python .github/scripts/pr7103-portable-server.py
+          --model-file "gguf-cache/${GGUF_FILE}"
+          --port "$STUDIO_PORT"
+          --timeout 900
+      - name: Exercise all six agents end to end
+        run: python .github/scripts/pr7103-agent-probe.py
+      - name: Upload redacted evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pr7103-live-${{ runner.os }}
+          path: |
+            logs/
+            agent-workdir/
+          if-no-files-found: warn
+
+  live-windows:
+    name: live six agents (windows-native)
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Install live-probe dependencies
+        shell: pwsh
+        run: python -m pip install huggingface_hub pyyaml
+      - name: Restore real GGUF
+        id: restore-model
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        continue-on-error: true
+        with:
+          path: gguf-cache
+          key: pr7103-${{ runner.os }}-${{ env.GGUF_FILE }}-v1
+      - name: Download real GGUF
+        if: steps.restore-model.outputs.cache-hit != 'true' || steps.restore-model.outcome != 'success'
+        shell: pwsh
+        run: |
+          python -m pip install huggingface_hub
+          python -c "import os; from huggingface_hub import hf_hub_download; hf_hub_download(os.environ['GGUF_REPO'], os.environ['GGUF_FILE'], local_dir='gguf-cache')"
+      - name: Save real GGUF
+        if: always() && steps.restore-model.outputs.cache-hit != 'true' && hashFiles('gguf-cache/*.gguf') != ''
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: gguf-cache
+          key: pr7103-${{ runner.os }}-${{ env.GGUF_FILE }}-v1
+      - name: Prepare Windows install
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          npm install -g 'npm@^11'
+          foreach ($p in @("$env:USERPROFILE\.unsloth", "$env:LOCALAPPDATA\uv", "$env:GITHUB_WORKSPACE\studio\frontend")) {
+            try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop } catch { Write-Host "Defender exclusion skipped: $p" }
+          }
+      - name: Install Studio from exact PR head
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          New-Item -ItemType Directory -Force logs | Out-Null
+          & ./install.ps1 --local --no-torch *>&1 | Tee-Object logs/install-studio.log
+          "$env:USERPROFILE\.unsloth\studio\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Install all six native agent CLIs
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          irm https://claude.ai/install.ps1 | iex
+          npm install -g @openai/codex opencode-ai openclaw@latest
+          npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+          & ([scriptblock]::Create((irm https://hermes-agent.nousresearch.com/install.ps1))) -SkipSetup
+          $npmPrefix = (npm prefix -g).Trim()
+          $agentPaths = @(
+            "$env:USERPROFILE\.local\bin",
+            "$env:USERPROFILE\.hermes\bin",
+            "$env:APPDATA\npm",
+            $npmPrefix,
+            [Environment]::GetEnvironmentVariable('Path', 'User'),
+            [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          ) | Where-Object { $_ }
+          $agentPaths | ForEach-Object { $_ | Out-File -Append -Encoding utf8 $env:GITHUB_PATH }
+          $env:PATH = (($agentPaths + $env:PATH) -join [IO.Path]::PathSeparator)
+          foreach ($cli in @('claude', 'codex', 'hermes', 'openclaw', 'opencode', 'pi')) {
+            Get-Command $cli -ErrorAction Stop | Format-List Name, Source
+          }
+      - name: Start real Studio GGUF server
+        shell: pwsh
+        run: python .github/scripts/pr7103-portable-server.py --model-file "gguf-cache/$env:GGUF_FILE" --port $env:STUDIO_PORT --timeout 900
+      - name: Exercise all six agents end to end
+        shell: pwsh
+        run: python .github/scripts/pr7103-agent-probe.py
+      - name: Upload redacted evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pr7103-live-Windows-native
+          path: |
+            logs/
+            agent-workdir/
+          if-no-files-found: warn
+
+  live-wsl:
+    name: live six agents (WSL2 Ubuntu)
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install a real WSL2 distribution
+        uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364  # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: '2'
+          additional-packages: curl git jq build-essential python3 python3-venv python3-pip
+      - name: Show physical WSL environment
+        shell: wsl-bash {0}
+        run: |
+          uname -a
+          cat /proc/version
+          python3 -c 'import platform; print(platform.platform())'
+          grep -qi microsoft /proc/version
+      - name: Install Studio, model, and six agents inside WSL2
+        shell: wsl-bash {0}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+
+          export GITHUB_PATH=/tmp/pr7103-github-path
+          export GITHUB_ENV=/tmp/pr7103-github-env
+          : > "$GITHUB_PATH"
+          : > "$GITHUB_ENV"
+          curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
+          apt-get install -y nodejs
+          python3 -m venv .pr7103-venv
+          .pr7103-venv/bin/pip install huggingface_hub pyyaml pytest typer click requests pydantic nest-asyncio packaging
+          export GGUF_REPO='unsloth/gemma-4-E2B-it-GGUF'
+          export GGUF_FILE='gemma-4-E2B-it-UD-Q4_K_XL.gguf'
+
+          .pr7103-venv/bin/python - <<'PY'
+          import os
+          from huggingface_hub import hf_hub_download
+          hf_hub_download(os.environ["GGUF_REPO"], os.environ["GGUF_FILE"], local_dir = "gguf-cache")
+          PY
+          bash install.sh --local --no-torch 2>&1 | tee logs-install-studio-wsl.log
+          for agent in claude codex hermes openclaw opencode pi; do
+            bash .github/scripts/agent-guides-install.sh "$agent"
+          done
+
+          cat "$GITHUB_PATH" >> /tmp/pr7103-agent-paths
+      - name: Run WSL contracts and all six live agents
+        shell: wsl-bash {0}
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$(npm prefix -g):$(paste -sd: /tmp/pr7103-agent-paths):$PATH"
+
+          export GGUF_FILE='gemma-4-E2B-it-UD-Q4_K_XL.gguf'
+          export STUDIO_PORT='18971'
+          export AGENT_INVOKE_TIMEOUT='900'
+          export GITHUB_ENV=/tmp/pr7103-github-env
+          : > "$GITHUB_ENV"
+          export UNSLOTH_NO_TORCH=1
+          unset UNSLOTH_STUDIO_URL UNSLOTH_BASE_URL
+          .pr7103-venv/bin/python -m pytest unsloth_cli/tests/test_start.py -q
+          unset UNSLOTH_NO_TORCH
+          .pr7103-venv/bin/python .github/scripts/pr7103-portable-server.py \
+            --model-file "gguf-cache/${GGUF_FILE}" --port "$STUDIO_PORT" --timeout 900
+          set -a
+          . "$GITHUB_ENV"
+          set +a
+          .pr7103-venv/bin/python .github/scripts/pr7103-agent-probe.py
+      - name: Upload redacted WSL evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pr7103-live-WSL2-Ubuntu
+          path: |
+            logs/
+            agent-workdir/
+            logs-install-studio-wsl.log
+          if-no-files-found: warn
