@@ -26,6 +26,8 @@ env:
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: '1'
 
+  COLUMNS: '160'
+
 jobs:
   unit-contracts:
     name: start.py contracts (${{ matrix.os }})
@@ -188,13 +190,20 @@ jobs:
           npm install -g @openai/codex opencode-ai openclaw@latest
           npm install -g --ignore-scripts @earendil-works/pi-coding-agent
           & ([scriptblock]::Create((irm https://hermes-agent.nousresearch.com/install.ps1))) -SkipSetup
-          @(
+          $npmPrefix = (npm prefix -g).Trim()
+          $agentPaths = @(
             "$env:USERPROFILE\.local\bin",
             "$env:USERPROFILE\.hermes\bin",
             "$env:APPDATA\npm",
+            $npmPrefix,
             [Environment]::GetEnvironmentVariable('Path', 'User'),
             [Environment]::GetEnvironmentVariable('Path', 'Machine')
-          ) | ForEach-Object { if ($_){ $_ | Out-File -Append -Encoding utf8 $env:GITHUB_PATH } }
+          ) | Where-Object { $_ }
+          $agentPaths | ForEach-Object { $_ | Out-File -Append -Encoding utf8 $env:GITHUB_PATH }
+          $env:PATH = (($agentPaths + $env:PATH) -join [IO.Path]::PathSeparator)
+          foreach ($cli in @('claude', 'codex', 'hermes', 'openclaw', 'opencode', 'pi')) {
+            Get-Command $cli -ErrorAction Stop | Format-List Name, Source
+          }
       - name: Start real Studio GGUF server
         shell: pwsh
         run: python .github/scripts/pr7103-portable-server.py --model-file "gguf-cache/$env:GGUF_FILE" --port $env:STUDIO_PORT --timeout 900
@@ -238,6 +247,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export DEBIAN_FRONTEND=noninteractive
+
+          export GITHUB_PATH=/tmp/pr7103-github-path
+          export GITHUB_ENV=/tmp/pr7103-github-env
+          : > "$GITHUB_PATH"
+          : > "$GITHUB_ENV"
           curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
           apt-get install -y nodejs
           python3 -m venv .pr7103-venv
@@ -254,10 +268,12 @@ jobs:
           for agent in claude codex hermes openclaw opencode pi; do
             bash .github/scripts/agent-guides-install.sh "$agent"
           done
+
+          cat "$GITHUB_PATH" >> /tmp/pr7103-agent-paths
       - name: Run WSL contracts and all six live agents
         shell: wsl-bash {0}
         run: |
-          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$(npm prefix -g):$(paste -sd: /tmp/pr7103-agent-paths):$PATH"
 
           export GGUF_FILE='gemma-4-E2B-it-UD-Q4_K_XL.gguf'
           export STUDIO_PORT='18971'
