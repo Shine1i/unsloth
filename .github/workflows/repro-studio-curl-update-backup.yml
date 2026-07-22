@@ -1,0 +1,177 @@
+name: Studio curl update rollback-backup repro
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'repro-studio-curl-update-backup-ci-*'
+
+permissions:
+  contents: read
+
+jobs:
+  curl-update-e2e:
+    name: Ubuntu full install, healthy launch, update, interrupted update
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      STUDIO_ROOT: ${{ runner.temp }}/studio-curl-update-e2e
+      INSTALL_URL: https://unsloth.ai/install.sh
+      UNSLOTH_SKIP_AUTOSTART: '1'
+      UNSLOTH_INSTALL_RETRIES: '3'
+    steps:
+      - name: Record runner and served installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a | tee "$RUNNER_TEMP/uname.txt"
+          df -h | tee "$RUNNER_TEMP/disk-before.txt"
+          curl -fsSL "$INSTALL_URL" -o "$RUNNER_TEMP/served-install.sh"
+          sha256sum "$RUNNER_TEMP/served-install.sh" | tee "$RUNNER_TEMP/installer-sha256.txt"
+          grep -n 'unsloth_studio.rollback' "$RUNNER_TEMP/served-install.sh" | head -5 | tee "$RUNNER_TEMP/rollback-source.txt"
+
+      - name: First real curl install (full torch)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL "$INSTALL_URL" \
+            | UNSLOTH_STUDIO_HOME="$STUDIO_ROOT" \
+              UNSLOTH_SKIP_AUTOSTART=1 \
+              UNSLOTH_INSTALL_RETRIES=3 \
+              sh 2>&1 | tee "$RUNNER_TEMP/first-install.log"
+          test -x "$STUDIO_ROOT/unsloth_studio/bin/unsloth"
+          test -f "$STUDIO_ROOT/unsloth_studio/.unsloth-studio-owned"
+          "$STUDIO_ROOT/unsloth_studio/bin/python" - <<'PY' | tee "$RUNNER_TEMP/versions.txt"
+          import sys, torch, unsloth
+          print('python=' + sys.version.replace('\n', ' '))
+          print('torch=' + torch.__version__)
+          print('unsloth=' + getattr(unsloth, '__version__', 'unknown'))
+          PY
+          du -sk "$STUDIO_ROOT/unsloth_studio" | tee "$RUNNER_TEMP/first-size-kib.txt"
+          df -h | tee "$RUNNER_TEMP/disk-after-first.txt"
+
+      - name: Launch installed Studio and prove health
+        shell: bash
+        run: |
+          set -euo pipefail
+          port=18888
+          setsid "$STUDIO_ROOT/unsloth_studio/bin/unsloth" studio -H 127.0.0.1 -p "$port" \
+            >"$RUNNER_TEMP/studio-server.log" 2>&1 &
+          server_pid=$!
+          cleanup() { kill -TERM -- "-$server_pid" 2>/dev/null || true; }
+          trap cleanup EXIT
+          for i in $(seq 1 180); do
+            if curl -fsS "http://127.0.0.1:$port/healthz" >"$RUNNER_TEMP/healthz.json"; then
+              echo "PASS first installed Studio /healthz" | tee "$RUNNER_TEMP/health-pass.txt"
+              cat "$RUNNER_TEMP/healthz.json"
+              exit 0
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo 'FAIL Studio exited before health check' >&2
+              tail -200 "$RUNNER_TEMP/studio-server.log" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          echo 'FAIL Studio health timeout' >&2
+          tail -200 "$RUNNER_TEMP/studio-server.log" >&2
+          exit 1
+
+      - name: Normal real curl update cleans its temporary rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          seen="$RUNNER_TEMP/normal-rollback-seen.txt"
+          : > "$seen"
+          (
+            while :; do
+              for path in "$STUDIO_ROOT"/unsloth_studio.rollback.*; do
+                if [ -d "$path" ]; then
+                  printf '%s\n' "$path" >> "$seen"
+                  exit 0
+                fi
+              done
+              sleep 0.05
+            done
+          ) &
+          watcher=$!
+          curl -fsSL "$INSTALL_URL" \
+            | UNSLOTH_STUDIO_HOME="$STUDIO_ROOT" \
+              UNSLOTH_SKIP_AUTOSTART=1 \
+              UNSLOTH_INSTALL_RETRIES=3 \
+              sh 2>&1 | tee "$RUNNER_TEMP/normal-update.log"
+          kill "$watcher" 2>/dev/null || true
+          wait "$watcher" 2>/dev/null || true
+          test -s "$seen"
+          if compgen -G "$STUDIO_ROOT/unsloth_studio.rollback.*" >/dev/null; then
+            echo 'FAIL normal update left rollback directories' >&2
+            du -sh "$STUDIO_ROOT"/unsloth_studio.rollback.* >&2
+            exit 1
+          fi
+          echo 'PASS normal update created a rollback transiently and removed it on success'
+          du -sk "$STUDIO_ROOT/unsloth_studio" | tee "$RUNNER_TEMP/post-normal-size-kib.txt"
+          df -h | tee "$RUNNER_TEMP/disk-after-normal-update.txt"
+
+      - name: Kill a real curl update after rollback and reproduce leaked multi-GB backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          setsid env \
+            UNSLOTH_STUDIO_HOME="$STUDIO_ROOT" \
+            UNSLOTH_SKIP_AUTOSTART=1 \
+            UNSLOTH_INSTALL_RETRIES=3 \
+            bash -o pipefail -c 'curl -fsSL "$INSTALL_URL" | sh' \
+            >"$RUNNER_TEMP/interrupted-update.log" 2>&1 &
+          update_pid=$!
+          rollback=''
+          for i in $(seq 1 1200); do
+            for path in "$STUDIO_ROOT"/unsloth_studio.rollback.*; do
+              if [ -d "$path" ]; then
+                rollback="$path"
+                break 2
+              fi
+            done
+            if ! kill -0 "$update_pid" 2>/dev/null; then
+              echo 'FAIL update exited before rollback appeared' >&2
+              cat "$RUNNER_TEMP/interrupted-update.log" >&2
+              exit 1
+            fi
+            sleep 0.05
+          done
+          if [ -z "$rollback" ]; then
+            echo 'FAIL rollback did not appear before timeout' >&2
+            kill -TERM -- "-$update_pid" 2>/dev/null || true
+            exit 1
+          fi
+          echo "Observed transient rollback: $rollback"
+          kill -KILL -- "-$update_pid"
+          wait "$update_pid" 2>/dev/null || true
+          sleep 2
+          test -d "$rollback"
+          rollback_kib=$(du -sk "$rollback" | awk '{print $1}')
+          installed_kib=$(awk '{print $1}' "$RUNNER_TEMP/post-normal-size-kib.txt")
+          printf 'rollback_kib=%s\ninstalled_before_update_kib=%s\n' "$rollback_kib" "$installed_kib" \
+            | tee "$RUNNER_TEMP/interrupted-result.txt"
+          # A rename-based rollback should be essentially the entire prior environment.
+          if [ "$rollback_kib" -lt $((installed_kib * 95 / 100)) ]; then
+            echo 'FAIL orphan rollback is unexpectedly smaller than prior full install' >&2
+            exit 1
+          fi
+          echo "PASS SIGKILL left the full previous environment at $rollback" \
+            | tee -a "$RUNNER_TEMP/interrupted-result.txt"
+          du -sh "$rollback" | tee "$RUNNER_TEMP/orphan-human-size.txt"
+          find "$STUDIO_ROOT" -maxdepth 1 -mindepth 1 -printf '%f\n' | sort \
+            | tee "$RUNNER_TEMP/studio-root-after-interruption.txt"
+          df -h | tee "$RUNNER_TEMP/disk-after-interruption.txt"
+
+      - name: Upload reproduction evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-curl-update-rollback-repro-ubuntu
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/*.txt
+            ${{ runner.temp }}/healthz.json
+            ${{ runner.temp }}/served-install.sh
+          if-no-files-found: warn
