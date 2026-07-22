@@ -113,7 +113,7 @@ jobs:
           du -sk "$STUDIO_ROOT/unsloth_studio" | tee "$RUNNER_TEMP/post-normal-size-kib.txt"
           df -h | tee "$RUNNER_TEMP/disk-after-normal-update.txt"
 
-      - name: Kill a real curl update after rollback and reproduce leaked multi-GB backup
+      - name: Kill first real curl update after rollback and reproduce leaked multi-GB backup
         shell: bash
         run: |
           set -euo pipefail
@@ -149,6 +149,7 @@ jobs:
           wait "$update_pid" 2>/dev/null || true
           sleep 2
           test -d "$rollback"
+          printf '%s\n' "$rollback" > "$RUNNER_TEMP/first-orphan-path.txt"
           rollback_kib=$(du -sk "$rollback" | awk '{print $1}')
           installed_kib=$(awk '{print $1}' "$RUNNER_TEMP/post-normal-size-kib.txt")
           printf 'rollback_kib=%s\ninstalled_before_update_kib=%s\n' "$rollback_kib" "$installed_kib" \
@@ -164,6 +165,109 @@ jobs:
           find "$STUDIO_ROOT" -maxdepth 1 -mindepth 1 -printf '%f\n' | sort \
             | tee "$RUNNER_TEMP/studio-root-after-interruption.txt"
           df -h | tee "$RUNNER_TEMP/disk-after-interruption.txt"
+
+      - name: Successful reinstall does not clean the stale rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          first_orphan=$(cat "$RUNNER_TEMP/first-orphan-path.txt")
+          test -d "$first_orphan"
+          curl -fsSL "$INSTALL_URL" \
+            | UNSLOTH_STUDIO_HOME="$STUDIO_ROOT" \
+              UNSLOTH_SKIP_AUTOSTART=1 \
+              UNSLOTH_INSTALL_RETRIES=3 \
+              sh 2>&1 | tee "$RUNNER_TEMP/recovery-install.log"
+          test -x "$STUDIO_ROOT/unsloth_studio/bin/unsloth"
+          test -d "$first_orphan"
+          first_orphan_kib=$(du -sk "$first_orphan" | awk '{print $1}')
+          installed_kib=$(du -sk "$STUDIO_ROOT/unsloth_studio" | awk '{print $1}')
+          printf 'stale_after_success_kib=%s\nrecovered_install_kib=%s\n' \
+            "$first_orphan_kib" "$installed_kib" \
+            | tee "$RUNNER_TEMP/recovery-result.txt"
+          echo 'PASS later successful reinstall left the stale full rollback untouched' \
+            | tee -a "$RUNNER_TEMP/recovery-result.txt"
+
+      - name: Launch recovered Studio and prove health again
+        shell: bash
+        run: |
+          set -euo pipefail
+          port=18889
+          setsid "$STUDIO_ROOT/unsloth_studio/bin/unsloth" studio -H 127.0.0.1 -p "$port" \
+            >"$RUNNER_TEMP/recovered-studio-server.log" 2>&1 &
+          server_pid=$!
+          cleanup() { kill -TERM -- "-$server_pid" 2>/dev/null || true; }
+          trap cleanup EXIT
+          for i in $(seq 1 180); do
+            if curl -fsS "http://127.0.0.1:$port/healthz" >"$RUNNER_TEMP/recovered-healthz.json"; then
+              echo 'PASS recovered Studio /healthz' | tee "$RUNNER_TEMP/recovered-health-pass.txt"
+              exit 0
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo 'FAIL recovered Studio exited before health check' >&2
+              tail -200 "$RUNNER_TEMP/recovered-studio-server.log" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          echo 'FAIL recovered Studio health timeout' >&2
+          exit 1
+
+      - name: Second interrupted update accumulates a second full rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          first_orphan=$(cat "$RUNNER_TEMP/first-orphan-path.txt")
+          setsid env \
+            UNSLOTH_STUDIO_HOME="$STUDIO_ROOT" \
+            UNSLOTH_SKIP_AUTOSTART=1 \
+            UNSLOTH_INSTALL_RETRIES=3 \
+            bash -o pipefail -c 'curl -fsSL "$INSTALL_URL" | sh' \
+            >"$RUNNER_TEMP/second-interrupted-update.log" 2>&1 &
+          update_pid=$!
+          second_orphan=''
+          for i in $(seq 1 1200); do
+            for path in "$STUDIO_ROOT"/unsloth_studio.rollback.*; do
+              if [ -d "$path" ] && [ "$path" != "$first_orphan" ]; then
+                second_orphan="$path"
+                break 2
+              fi
+            done
+            if ! kill -0 "$update_pid" 2>/dev/null; then
+              echo 'FAIL second update exited before a new rollback appeared' >&2
+              cat "$RUNNER_TEMP/second-interrupted-update.log" >&2
+              exit 1
+            fi
+            sleep 0.05
+          done
+          test -n "$second_orphan"
+          kill -KILL -- "-$update_pid"
+          wait "$update_pid" 2>/dev/null || true
+          sleep 2
+          test -d "$first_orphan"
+          test -d "$second_orphan"
+          installed_kib=$(awk '{print $1}' "$RUNNER_TEMP/post-normal-size-kib.txt")
+          count=0
+          total_kib=0
+          : > "$RUNNER_TEMP/accumulated-rollbacks.txt"
+          for path in "$STUDIO_ROOT"/unsloth_studio.rollback.*; do
+            test -d "$path" || continue
+            size_kib=$(du -sk "$path" | awk '{print $1}')
+            printf '%s\t%s KiB\n' "$path" "$size_kib" | tee -a "$RUNNER_TEMP/accumulated-rollbacks.txt"
+            if [ "$size_kib" -lt $((installed_kib * 95 / 100)) ]; then
+              echo "FAIL accumulated rollback is not a full environment: $path" >&2
+              exit 1
+            fi
+            count=$((count + 1))
+            total_kib=$((total_kib + size_kib))
+          done
+          printf 'rollback_count=%s\ntotal_rollback_kib=%s\n' "$count" "$total_kib" \
+            | tee -a "$RUNNER_TEMP/accumulated-rollbacks.txt"
+          test "$count" -eq 2
+          echo 'PASS two interrupted updates around a successful recovery accumulated two full rollback environments' \
+            | tee -a "$RUNNER_TEMP/accumulated-rollbacks.txt"
+          du -sh "$STUDIO_ROOT"/unsloth_studio.rollback.* \
+            | tee "$RUNNER_TEMP/accumulated-rollbacks-human-size.txt"
+          df -h | tee "$RUNNER_TEMP/disk-after-second-interruption.txt"
 
       - name: Upload reproduction evidence
         if: always()
