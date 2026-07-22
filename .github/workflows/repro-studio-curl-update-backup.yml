@@ -42,10 +42,11 @@ jobs:
           test -x "$STUDIO_ROOT/unsloth_studio/bin/unsloth"
           test -f "$STUDIO_ROOT/unsloth_studio/.unsloth-studio-owned"
           "$STUDIO_ROOT/unsloth_studio/bin/python" - <<'PY' | tee "$RUNNER_TEMP/versions.txt"
-          import sys, torch, unsloth
+          import sys, torch
+          from importlib.metadata import version
           print('python=' + sys.version.replace('\n', ' '))
           print('torch=' + torch.__version__)
-          print('unsloth=' + getattr(unsloth, '__version__', 'unknown'))
+          print('unsloth=' + version('unsloth'))
           PY
           du -sk "$STUDIO_ROOT/unsloth_studio" | tee "$RUNNER_TEMP/first-size-kib.txt"
           df -h | tee "$RUNNER_TEMP/disk-after-first.txt"
