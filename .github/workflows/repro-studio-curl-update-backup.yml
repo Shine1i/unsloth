@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      STUDIO_ROOT: ${{ runner.temp }}/studio-curl-update-e2e
+      STUDIO_ROOT: ${{ github.workspace }}/.studio-curl-update-e2e
       INSTALL_URL: https://unsloth.ai/install.sh
       UNSLOTH_SKIP_AUTOSTART: '1'
       UNSLOTH_INSTALL_RETRIES: '3'
