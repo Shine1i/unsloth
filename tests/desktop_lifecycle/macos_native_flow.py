@@ -58,11 +58,11 @@ end tell
 
 def click_get_started(process_hint: str) -> tuple[int, int]:
     x, y, width, height = window_bounds(process_hint)
-    # StartupScreen has one primary action centered 40 px above its bottom
-    # margin. Use the observed native window bounds rather than hard-coding
-    # screen coordinates.
+    # The 760x560 packaged startup layout places the primary action 88 px above
+    # the observed window bottom. Use native bounds rather than screen-fixed
+    # coordinates.
     click_x = x + width // 2
-    click_y = y + height - 62
+    click_y = y + height - 88
     script = f'''
 tell application "System Events"
   set candidates to every application process whose name contains "{process_hint}"
@@ -151,6 +151,16 @@ def main() -> int:
             encoding="utf-8",
         )
         paths.append(click_path)
+        setup_deadline = time.monotonic() + 90
+        managed_root = Path.home() / ".unsloth" / "studio"
+        while time.monotonic() < setup_deadline:
+            if managed_root.exists() or candidate_health() is not None:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError(
+                "native click did not start setup or create the managed root"
+            )
         time.sleep(3)
         installing_shot = evidence.screenshots_dir / "02-installing.png"
         screenshot(installing_shot)
@@ -184,6 +194,23 @@ def main() -> int:
         )
         if args.playwright_smoke:
             paths.extend(run_installed_web_ui_smoke(evidence, args.playwright_smoke))
+        final_bounds = window_bounds(args.process_hint)
+        final_bounds_path = args.evidence / "final-window.json"
+        final_bounds_path.write_text(
+            json.dumps(
+                {
+                    "x": final_bounds[0],
+                    "y": final_bounds[1],
+                    "width": final_bounds[2],
+                    "height": final_bounds[3],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        final_shot = evidence.screenshots_dir / "04-final.png"
+        screenshot(final_shot)
+        paths.extend([final_bounds_path, final_shot])
         evidence.record(
             args.scenario,
             "verified",
