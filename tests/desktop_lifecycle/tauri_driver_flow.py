@@ -13,6 +13,7 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -99,7 +100,7 @@ class WebDriver:
         return str(self.request("GET", self.endpoint("/source"), timeout=30))
 
     def screenshot(self, path: Path) -> None:
-        encoded = self.request("GET", self.endpoint("/screenshot"), timeout=60)
+        encoded = self.request("GET", self.endpoint("/screenshot"), timeout=20)
         path.write_bytes(base64.b64decode(encoded))
 
     def find_xpath(self, xpath: str) -> str:
@@ -127,6 +128,27 @@ class WebDriver:
         except Exception:
             pass
         self.session_id = None
+
+
+def capture_desktop_screenshot(driver: WebDriver, path: Path) -> None:
+    """Capture the visible desktop without relying on unsupported WebKit commands."""
+
+    scrot = shutil.which("scrot")
+    if sys.platform.startswith("linux") and scrot:
+        completed = subprocess.run(
+            [scrot, "--silent", "--overwrite", str(path)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise WebDriverError(
+                f"scrot exited {completed.returncode}: {completed.stdout.strip()}"
+            )
+        return
+    driver.screenshot(path)
 
 
 def health_on_candidate_ports() -> tuple[int, dict[str, Any]] | None:
@@ -188,7 +210,7 @@ def first_install(args: argparse.Namespace) -> int:
         wait_for_text(driver, "Get Started", timeout=180, source_path=initial_source)
         phase_paths.append(initial_source)
         initial_shot = evidence.screenshots_dir / "01-get-started.png"
-        driver.screenshot(initial_shot)
+        capture_desktop_screenshot(driver, initial_shot)
         phase_paths.append(initial_shot)
 
         button = driver.find_xpath("//button[normalize-space()='Get Started']")
@@ -197,7 +219,7 @@ def first_install(args: argparse.Namespace) -> int:
         wait_for_text(driver, "Installing...", timeout=120, source_path=installing_source)
         phase_paths.append(installing_source)
         installing_shot = evidence.screenshots_dir / "02-installing.png"
-        driver.screenshot(installing_shot)
+        capture_desktop_screenshot(driver, installing_shot)
         phase_paths.append(installing_shot)
 
         deadline = time.monotonic() + args.install_timeout
@@ -227,7 +249,7 @@ def first_install(args: argparse.Namespace) -> int:
         )
         phase_paths.append(health_path)
         running_shot = evidence.screenshots_dir / "03-running.png"
-        driver.screenshot(running_shot)
+        capture_desktop_screenshot(driver, running_shot)
         phase_paths.append(running_shot)
         process_path = evidence.snapshot_processes("running")
         tree_path = evidence.snapshot_tree(
@@ -269,7 +291,7 @@ def first_install(args: argparse.Namespace) -> int:
     except Exception as error:
         try:
             failure_shot = evidence.screenshots_dir / "99-failure.png"
-            driver.screenshot(failure_shot)
+            capture_desktop_screenshot(driver, failure_shot)
             phase_paths.append(failure_shot)
         except Exception:
             pass
@@ -319,4 +341,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

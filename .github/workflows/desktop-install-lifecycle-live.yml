@@ -124,7 +124,7 @@ jobs:
           sudo apt-get install -y \
             build-essential cmake curl dbus-x11 git jq libappindicator3-dev \
             libcurl4-openssl-dev libfuse2 libssl-dev libwebkit2gtk-4.1-dev \
-            libxdo-dev patchelf procps librsvg2-dev webkit2gtk-driver xdg-utils xvfb
+            libxdo-dev patchelf procps librsvg2-dev scrot webkit2gtk-driver xdg-utils xvfb
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
@@ -322,6 +322,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
+          GDK_BACKEND: x11
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
         run: |
           set -euo pipefail
@@ -357,6 +358,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
+          GDK_BACKEND: x11
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
         run: |
           set -euo pipefail
