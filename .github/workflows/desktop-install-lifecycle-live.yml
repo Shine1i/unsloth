@@ -1,0 +1,437 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved.
+
+name: Desktop install lifecycle live verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_packaged_first_install:
+        description: Build signed packages and drive fresh first install on all hosted OSes
+        type: boolean
+        default: true
+      run_destructive_p0:
+        description: Run destructive P0 probes in a disposable Linux home
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-install-lifecycle-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  EVIDENCE_RETENTION_DAYS: '30'
+
+jobs:
+  destructive-p0-linux:
+    name: P0 destructive probes (disposable Linux home)
+    if: inputs.run_destructive_p0
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Install real installer prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake curl git libcurl4-openssl-dev
+
+      - name: Run substituted-bootstrap and destructive-uninstall probes
+        id: probes
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          disposable_home="$RUNNER_TEMP/p0-home"
+          mkdir -p "$disposable_home"
+          touch "$disposable_home/.desktop-lifecycle-disposable"
+          HOME="$disposable_home" \
+          DESKTOP_LIFECYCLE_REAL_HOME="$HOME" \
+            python3 tests/desktop_lifecycle/p0_destructive_probes.py \
+              --repo "$GITHUB_WORKSPACE" \
+              --evidence "$RUNNER_TEMP/evidence-p0"
+
+      - name: Upload P0 evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: desktop-lifecycle-p0-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence-p0
+          if-no-files-found: error
+          retention-days: ${{ env.EVIDENCE_RETENTION_DAYS }}
+
+      - name: Enforce release-blocker result
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          path = pathlib.Path(os.environ["RUNNER_TEMP"], "evidence-p0", "results.json")
+          data = json.loads(path.read_text())
+          failed = [result for result in data["results"] if result["status"] == "failed"]
+          if failed:
+              for result in failed:
+                  print(f"::error title={result['scenario']}::{result['summary']}")
+              sys.exit(1)
+          PY
+
+  packaged-first-install:
+    name: Packaged first install (${{ matrix.label }})
+    if: inputs.run_packaged_first_install
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: Linux x64 deb
+            scenario: PKG-03
+          - os: windows-latest
+            label: Windows x64 NSIS
+            scenario: PKG-01
+          - os: macos-14
+            label: macOS Apple Silicon DMG
+            scenario: PKG-02
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Initialize runner-local evidence path
+        shell: bash
+        run: printf 'EVIDENCE_DIR=%s\n' "$RUNNER_TEMP/desktop-lifecycle-evidence" >> "$GITHUB_ENV"
+
+      - name: Install Linux build, package, GUI, and WebDriver dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake curl dbus-x11 git jq libappindicator3-dev \
+            libcurl4-openssl-dev libfuse2 libssl-dev libwebkit2gtk-4.1-dev \
+            libxdo-dev patchelf procps librsvg2-dev webkit2gtk-driver xvfb
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: studio/src-tauri -> target
+
+      - name: Install exact desktop build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix studio --no-fund --no-audit
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          version="$(npx --prefix studio tauri --version)"
+          test "$version" = "tauri-cli 2.10.1"
+
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          certificate="$RUNNER_TEMP/desktop-lifecycle-certificate.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" desktop-lifecycle.keychain
+          security default-keychain -s desktop-lifecycle.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" desktop-lifecycle.keychain
+          security set-keychain-settings -t 10800 -u desktop-lifecycle.keychain
+          security import "$certificate" -k desktop-lifecycle.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" desktop-lifecycle.keychain
+          security find-identity -v -p codesigning desktop-lifecycle.keychain
+          rm -f "$certificate"
+
+      - name: Install Azure Trusted Signing client
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo install trusted-signing-cli --version 0.10.0 --locked
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Pin Linux AppImage packaging executable by digest
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          LINUXDEPLOY_URL: https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage
+          LINUXDEPLOY_SHA256: 4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a
+        run: |
+          set -euo pipefail
+          tools_dir="$RUNNER_TEMP/tauri-tools-cache/tauri"
+          mkdir -p "$tools_dir"
+          destination="$tools_dir/linuxdeploy-x86_64.AppImage"
+          curl -fsSL "$LINUXDEPLOY_URL" -o "$destination"
+          echo "$LINUXDEPLOY_SHA256  $destination" | sha256sum -c -
+          chmod +x "$destination"
+
+      - name: Build signed Linux packages
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/tauri-tools-cache
+        run: npx --prefix studio tauri build -v
+
+      - name: Build signed and notarized macOS package
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx --prefix studio tauri build -v
+
+      - name: Build signed Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
+        run: npx --prefix studio tauri build -v
+
+      - name: Inventory and hash produced package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/package"
+          find studio/src-tauri/target/release/bundle -type f -print | sort \
+            | tee "$EVIDENCE_DIR/package/files.txt"
+          while IFS= read -r artifact; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$artifact"
+            else
+              shasum -a 256 "$artifact"
+            fi
+          done < "$EVIDENCE_DIR/package/files.txt" \
+            | tee "$EVIDENCE_DIR/package/sha256.txt"
+
+      - name: Verify and install Linux deb package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="$(find studio/src-tauri/target/release/bundle/deb -type f -name '*.deb' -print -quit)"
+          test -n "$deb"
+          dpkg-deb --info "$deb" | tee "$EVIDENCE_DIR/package/deb-info.txt"
+          sudo dpkg -i "$deb" | tee "$EVIDENCE_DIR/package/deb-install.txt"
+          command -v unsloth-studio
+
+      - name: Verify and install Windows NSIS package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem studio/src-tauri/target/release/bundle/nsis -Filter '*setup.exe' |
+            Select-Object -First 1
+          if (-not $installer) { throw 'NSIS setup artifact not found' }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+          $signature | Format-List * | Out-File "$env:EVIDENCE_DIR\package\authenticode.txt"
+          if ($signature.Status -ne 'Valid') {
+            throw "NSIS Authenticode signature is $($signature.Status)"
+          }
+          $process = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS silent install exited $($process.ExitCode)" }
+          $application = Join-Path $env:LOCALAPPDATA 'Unsloth Studio (Desktop)\unsloth-studio.exe'
+          if (-not (Test-Path -LiteralPath $application)) { throw "installed app missing: $application" }
+          "DESKTOP_APPLICATION=$application" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify, mount, and install macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(find studio/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
+          test -n "$dmg"
+          xcrun stapler validate "$dmg" 2>&1 | tee "$EVIDENCE_DIR/package/dmg-stapler.txt"
+          mount_point="$RUNNER_TEMP/desktop-lifecycle-dmg"
+          mkdir -p "$mount_point"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point" \
+            | tee "$EVIDENCE_DIR/package/dmg-attach.txt"
+          source_app="$(find "$mount_point" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$source_app"
+          destination="/Applications/$(basename "$source_app")"
+          sudo ditto "$source_app" "$destination"
+          hdiutil detach "$mount_point"
+          codesign --verify --deep --strict --verbose=4 "$destination" 2>&1 \
+            | tee "$EVIDENCE_DIR/package/codesign.txt"
+          spctl --assess --type execute --verbose=4 "$destination" 2>&1 \
+            | tee "$EVIDENCE_DIR/package/gatekeeper.txt"
+          printf 'DESKTOP_APPLICATION=%s\n' "$destination" >> "$GITHUB_ENV"
+
+      - name: Install Playwright and its Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'playwright>=1.55,<1.60'
+          if [ "$RUNNER_OS" = Linux ]; then
+            python -m playwright install chromium
+          else
+            python -m playwright install chromium
+          fi
+
+      - name: Install tauri-driver and verify matching native driver
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install tauri-driver --locked
+          mkdir -p "$EVIDENCE_DIR/package"
+          if [ "$RUNNER_OS" = Windows ]; then
+            command -v msedgedriver
+            msedgedriver --version | tee "$EVIDENCE_DIR/package/msedgedriver-version.txt"
+          fi
+          tauri-driver --help
+
+      - name: Drive Linux packaged setup and verify backend/web UI
+        id: linux_flow
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        env:
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+        run: |
+          set -euo pipefail
+          dbus-run-session -- xvfb-run -a \
+            python tests/desktop_lifecycle/tauri_driver_flow.py \
+              --application /usr/bin/unsloth-studio \
+              --scenario '${{ matrix.scenario }}' \
+              --evidence "$EVIDENCE_DIR/live-deb" \
+              --playwright-smoke tests/desktop_lifecycle/playwright_web_smoke.py
+
+      - name: Reset Linux managed state for fresh AppImage setup
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_backup="$RUNNER_TEMP/deb-managed-state"
+          mkdir -p "$state_backup"
+          for state_path in "$HOME/.unsloth" "$HOME/.local/share/unsloth"; do
+            if [ -e "$state_path" ]; then
+              mv "$state_path" "$state_backup/$(basename "$state_path")"
+            fi
+          done
+          rm -f "$HOME/.local/bin/unsloth"
+          appimage="$(find studio/src-tauri/target/release/bundle/appimage \
+            -type f -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          chmod +x "$appimage"
+          printf 'DESKTOP_APPIMAGE=%s\n' "$appimage" >> "$GITHUB_ENV"
+
+      - name: Drive fresh Linux AppImage setup and verify backend/web UI
+        id: appimage_flow
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        env:
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+        run: |
+          set -euo pipefail
+          dbus-run-session -- xvfb-run -a \
+            python tests/desktop_lifecycle/tauri_driver_flow.py \
+              --application "$DESKTOP_APPIMAGE" \
+              --scenario '${{ matrix.scenario }}' \
+              --evidence "$EVIDENCE_DIR/live-appimage" \
+              --playwright-smoke tests/desktop_lifecycle/playwright_web_smoke.py
+
+      - name: Drive Windows packaged setup and verify backend/web UI
+        id: windows_flow
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python tests/desktop_lifecycle/tauri_driver_flow.py `
+            --application "$env:DESKTOP_APPLICATION" `
+            --scenario '${{ matrix.scenario }}' `
+            --evidence "$env:EVIDENCE_DIR\live" `
+            --playwright-smoke tests/desktop_lifecycle/playwright_web_smoke.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Drive macOS packaged setup and verify backend/web UI
+        id: macos_flow
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/desktop_lifecycle/macos_native_flow.py \
+            --app "$DESKTOP_APPLICATION" \
+            --scenario '${{ matrix.scenario }}' \
+            --evidence "$EVIDENCE_DIR/live" \
+            --playwright-smoke tests/desktop_lifecycle/playwright_web_smoke.py
+
+      - name: Upload packaged lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: desktop-lifecycle-${{ runner.os }}-${{ runner.arch }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE_DIR }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: ${{ env.EVIDENCE_RETENTION_DAYS }}
+
+      - name: Enforce packaged lifecycle release gate
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          evidence = pathlib.Path(os.environ["EVIDENCE_DIR"])
+          result_paths = sorted(evidence.rglob("results.json"))
+          expected = 2 if os.environ["RUNNER_OS"] == "Linux" else 1
+          if len(result_paths) != expected:
+              sys.exit(
+                  f"Packaged lifecycle produced {len(result_paths)} result files, "
+                  f"expected {expected}: {result_paths}"
+              )
+          failures = []
+          for result_path in result_paths:
+              results = json.loads(result_path.read_text())["results"]
+              if len(results) != 1:
+                  sys.exit(f"Expected one result in {result_path}, got {len(results)}")
+              result = results[0]
+              print(json.dumps(result, indent=2))
+              if result["status"] != "verified":
+                  failures.append(result)
+          for result in failures:
+              print(f"::error title={result['scenario']}::{result['summary']}")
+          if failures:
+              sys.exit(1)
+          PY
