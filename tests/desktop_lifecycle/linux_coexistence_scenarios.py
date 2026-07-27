@@ -180,6 +180,8 @@ def main() -> int:
     cli = default_root / "unsloth_studio" / "bin" / "unsloth"
     if not cli.is_file():
         raise RuntimeError(f"Installed CLI missing: {cli}")
+    install_id = default_root / "share" / "studio_install_id"
+    initial_install_id = install_id.read_bytes() if install_id.is_file() else None
 
     os.environ.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
     evidence = EvidenceRun(args.evidence, "linux-coexistence")
@@ -215,7 +217,6 @@ def main() -> int:
     default_root_moved = False
 
     try:
-        install_id = default_root / "share" / "studio_install_id"
         missing_id = not install_id.is_file()
         corrupt_session = DriverSession(
             driver_args(args, driver_port=4944, native_port=4945),
@@ -699,6 +700,11 @@ def main() -> int:
             backup_root.rename(default_root)
         if custom_root.exists():
             remove_fixture_tree(custom_root, home)
+        if initial_install_id is None:
+            install_id.unlink(missing_ok=True)
+        else:
+            install_id.parent.mkdir(parents=True, exist_ok=True)
+            install_id.write_bytes(initial_install_id)
 
     return 1 if any(result.status == "failed" for result in evidence.results) else 0
 
