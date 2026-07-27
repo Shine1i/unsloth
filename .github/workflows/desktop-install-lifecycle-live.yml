@@ -10,6 +10,15 @@ on:
         description: Build signed packages and drive fresh first install on all hosted OSes
         type: boolean
         default: true
+      packaged_platform:
+        description: Hosted package platform to run
+        type: choice
+        options:
+          - all
+          - linux
+          - windows
+          - macos
+        default: all
       run_destructive_p0:
         description: Run destructive P0 probes in a disposable Linux home
         type: boolean
@@ -86,22 +95,47 @@ jobs:
               sys.exit(1)
           PY
 
+  select-packaged-matrix:
+    name: Select packaged first-install matrix
+    if: inputs.run_packaged_first_install
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Select requested hosted package platforms
+        id: select
+        shell: bash
+        env:
+          PACKAGED_PLATFORM: ${{ inputs.packaged_platform }}
+        run: |
+          set -euo pipefail
+          case "$PACKAGED_PLATFORM" in
+            all)
+              matrix='{"include":[{"os":"ubuntu-22.04","label":"Linux x64 deb","scenario":"PKG-03"},{"os":"windows-latest","label":"Windows x64 NSIS","scenario":"PKG-01"},{"os":"macos-14","label":"macOS Apple Silicon DMG","scenario":"PKG-02"}]}'
+              ;;
+            linux)
+              matrix='{"include":[{"os":"ubuntu-22.04","label":"Linux x64 deb","scenario":"PKG-03"}]}'
+              ;;
+            windows)
+              matrix='{"include":[{"os":"windows-latest","label":"Windows x64 NSIS","scenario":"PKG-01"}]}'
+              ;;
+            macos)
+              matrix='{"include":[{"os":"macos-14","label":"macOS Apple Silicon DMG","scenario":"PKG-02"}]}'
+              ;;
+            *)
+              printf 'Unsupported packaged_platform: %s\n' "$PACKAGED_PLATFORM" >&2
+              exit 1
+              ;;
+          esac
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+
   packaged-first-install:
     name: Packaged first install (${{ matrix.label }})
     if: inputs.run_packaged_first_install
+    needs: select-packaged-matrix
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            label: Linux x64 deb
-            scenario: PKG-03
-          - os: windows-latest
-            label: Windows x64 NSIS
-            scenario: PKG-01
-          - os: macos-14
-            label: macOS Apple Silicon DMG
-            scenario: PKG-02
+      matrix: ${{ fromJSON(needs.select-packaged-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     env:
