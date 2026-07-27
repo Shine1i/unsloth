@@ -36,13 +36,15 @@ The other disposable-Linux probes are deliberately separate because they
 mutate different lifecycle boundaries:
 
 - `linux_coexistence_scenarios.py`: partial default root, custom-root-only,
-  foreign-root backend, and same-root terminal backend (`COEX-04`, `COEX-05`,
-  `COEX-08`, `COEX-09`);
+  custom plus default roots, a different PATH CLI, foreign-root backend, and
+  same-root terminal backend (`COEX-04`–`COEX-09`);
 - `linux_package_transition_scenarios.py`: native removal/data preservation,
   deb reinstall, and deb/AppImage switching (`UN-01`, `UN-03`, `UN-04`,
   `UN-06`);
 - `linux_fault_scenarios.py`: missing WebKitGTK loader dependency and a
   read-only managed root (`PKG-06`, `INST-10`);
+- `linux_owner_metadata_scenarios.py`: corrupt owner-metadata replacement
+  (`RUN-03`);
 - `linux_window_close_scenarios.py`: native X11 close/reopen while the bundled
   installer is active (`RUN-06`).
 

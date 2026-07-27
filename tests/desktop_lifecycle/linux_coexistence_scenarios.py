@@ -183,7 +183,14 @@ def main() -> int:
 
     os.environ.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
     evidence = EvidenceRun(args.evidence, "linux-coexistence")
-    for scenario in ("COEX-04", "COEX-05", "COEX-08", "COEX-09"):
+    for scenario in (
+        "COEX-04",
+        "COEX-05",
+        "COEX-06",
+        "COEX-07",
+        "COEX-08",
+        "COEX-09",
+    ):
         evidence.begin(scenario)
     manifest_path = evidence.output_dir / "coexistence-inputs.json"
     manifest_path.write_text(
@@ -414,6 +421,108 @@ def main() -> int:
         install_id.parent.mkdir(parents=True, exist_ok=True)
         install_id.write_text(DEFAULT_ROOT_ID, encoding="utf-8")
 
+        old_custom_home = os.environ.get("UNSLOTH_STUDIO_HOME")
+        old_studio_home = os.environ.get("STUDIO_HOME")
+        old_path = os.environ["PATH"]
+        os.environ["UNSLOTH_STUDIO_HOME"] = str(custom_root)
+        os.environ["STUDIO_HOME"] = str(custom_root)
+        os.environ["PATH"] = (
+            f"{custom_root / 'unsloth_studio' / 'bin'}{os.pathsep}{old_path}"
+        )
+        default_wins_session = DriverSession(
+            driver_args(args, driver_port=5094, native_port=5095),
+            evidence,
+            "coex06-07-default-wins",
+        )
+        sessions.append(default_wins_session)
+        default_wins_driver = default_wins_session.start()
+        default_wins_port, default_wins_health = wait_until(
+            health_on_candidate_ports,
+            180,
+            "default-root backend with custom root and PATH CLI present",
+        )
+        default_wins_source = wait_until(
+            lambda: (source if "New chat" in source else None)
+            if (source := default_wins_driver.source())
+            else None,
+            120,
+            "usable default-root UI with custom root and PATH CLI present",
+        )
+        (
+            _source,
+            default_wins_source_path,
+            default_wins_shot,
+            default_wins_processes,
+        ) = capture_ui(default_wins_driver, evidence, "coex06-07-default-wins")
+        default_wins_tree = evidence.snapshot_tree(
+            "coex06-07-roots",
+            [
+                default_root / "share" / "studio_install_id",
+                custom_root / "share" / "studio_install_id",
+                custom_root / "custom-root-canary",
+            ],
+        )
+        default_won = (
+            default_wins_health.get("studio_root_id") == DEFAULT_ROOT_ID
+            and "New chat" in _source
+            and (custom_root / "share" / "studio_install_id").read_text(
+                encoding="utf-8"
+            )
+            == CUSTOM_ROOT_ID
+            and (custom_root / "custom-root-canary").read_text(encoding="utf-8")
+            == "desktop lifecycle custom root\n"
+        )
+        common_default_wins_paths = [
+            *common_paths,
+            default_wins_source_path,
+            default_wins_shot,
+            default_wins_processes,
+            default_wins_tree,
+            evidence.logs_dir / "tauri-driver-coex06-07-default-wins.log",
+        ]
+        record(
+            evidence,
+            "COEX-06",
+            default_won,
+            (
+                "With healthy custom and default roots plus both custom-root "
+                f"variables exported, desktop started root ID "
+                f"{default_wins_health.get('studio_root_id')!r} on "
+                f"{default_wins_port}; custom state remained unchanged."
+            ),
+            common_default_wins_paths,
+            mismatch=(
+                "Desktop did not deterministically manage the default root or "
+                "mutated the custom root."
+            ),
+        )
+        record(
+            evidence,
+            "COEX-07",
+            default_won,
+            (
+                "With the custom-root CLI first on PATH, desktop still started "
+                f"the explicit default-root backend on {default_wins_port}; "
+                "custom state remained unchanged."
+            ),
+            common_default_wins_paths,
+            mismatch=(
+                "Desktop followed the PATH CLI instead of its explicit "
+                "default-root executable or mutated the other install."
+            ),
+        )
+        stop_desktop(default_wins_session, home)
+        sessions.remove(default_wins_session)
+        if old_custom_home is None:
+            os.environ.pop("UNSLOTH_STUDIO_HOME", None)
+        else:
+            os.environ["UNSLOTH_STUDIO_HOME"] = old_custom_home
+        if old_studio_home is None:
+            os.environ.pop("STUDIO_HOME", None)
+        else:
+            os.environ["STUDIO_HOME"] = old_studio_home
+        os.environ["PATH"] = old_path
+
         same_log = evidence.logs_dir / "coex09-same-root-external.log"
         same_external, same_health = start_external_backend(cli, same_log)
         externals.append(same_external)
@@ -559,7 +668,14 @@ def main() -> int:
         stop_external_backend(foreign_external)
         externals.remove(foreign_external)
     except Exception as error:
-        for scenario in ("COEX-04", "COEX-05", "COEX-08", "COEX-09"):
+        for scenario in (
+            "COEX-04",
+            "COEX-05",
+            "COEX-06",
+            "COEX-07",
+            "COEX-08",
+            "COEX-09",
+        ):
             if not any(result.scenario == scenario for result in evidence.results):
                 evidence.record(
                     scenario,
