@@ -33,18 +33,26 @@ user32 = ctypes.windll.user32
 
 
 def find_window(pid: int) -> int | None:
-    windows: list[int] = []
+    windows: list[tuple[int, int]] = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     def callback(hwnd: int, _lparam: int) -> bool:
         window_pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
         if window_pid.value == pid and user32.IsWindowVisible(hwnd):
-            windows.append(hwnd)
+            rectangle = wintypes.RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(rectangle)):
+                width = rectangle.right - rectangle.left
+                height = rectangle.bottom - rectangle.top
+                # WebView2/Tauri can expose a transient 16x16 helper HWND before
+                # the real setup window. Clicking it produces an off-screen
+                # coordinate while the application itself remains healthy.
+                if width >= 320 and height >= 240:
+                    windows.append((width * height, hwnd))
         return True
 
     user32.EnumWindows(callback, 0)
-    return windows[0] if windows else None
+    return max(windows)[1] if windows else None
 
 
 def window_bounds(hwnd: int) -> tuple[int, int, int, int]:
