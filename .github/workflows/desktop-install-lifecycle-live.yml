@@ -315,9 +315,12 @@ jobs:
           else
             python -m playwright install chromium
           fi
+          if [ "$RUNNER_OS" = Windows ]; then
+            python -m pip install 'pillow>=11,<13'
+          fi
 
       - name: Install tauri-driver
-        if: runner.os == 'Linux' || runner.os == 'Windows'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -378,6 +381,7 @@ jobs:
         shell: bash
         env:
           GDK_BACKEND: x11
+          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
         run: |
           set -euo pipefail
@@ -414,6 +418,7 @@ jobs:
         shell: bash
         env:
           GDK_BACKEND: x11
+          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
         run: |
           set -euo pipefail
@@ -430,11 +435,10 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          python tests/desktop_lifecycle/tauri_driver_flow.py `
+          python tests/desktop_lifecycle/windows_native_flow.py `
             --application "$env:DESKTOP_APPLICATION" `
             --scenario '${{ matrix.scenario }}' `
             --evidence "$env:EVIDENCE_DIR\live" `
-            --native-driver "$env:TAURI_NATIVE_DRIVER" `
             --playwright-smoke tests/desktop_lifecycle/playwright_web_smoke.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

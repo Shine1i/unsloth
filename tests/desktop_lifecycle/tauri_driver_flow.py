@@ -206,6 +206,51 @@ def collect_tauri_runtime_logs(evidence: EvidenceRun) -> list[Path]:
     return collected
 
 
+def cleanup_linux_desktop_backends() -> None:
+    """Stop only disposable/CI backend processes rooted in the current home."""
+
+    if not sys.platform.startswith("linux"):
+        return
+    home = str(Path.home().resolve())
+    completed = subprocess.run(
+        ["ps", "-eo", "pid=,args="],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    targets: list[int] = []
+    for line in completed.stdout.splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        pid = int(fields[0])
+        command = fields[1]
+        if home not in command or " studio --api-only " not in f" {command} ":
+            continue
+        targets.append(pid)
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if health_on_candidate_ports() is None:
+            return
+        time.sleep(0.5)
+    for pid in targets:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def first_install(args: argparse.Namespace) -> int:
     output = Path(args.evidence).resolve()
     evidence = EvidenceRun(output, f"{args.scenario}-tauri-first-install")
@@ -286,6 +331,18 @@ def first_install(args: argparse.Namespace) -> int:
             phase_paths.extend(
                 run_installed_web_ui_smoke(evidence, args.playwright_smoke)
             )
+        time.sleep(3)
+        final_source = output / "final-source.html"
+        settled_source = driver.source()
+        final_source.write_text(
+            settled_source, encoding="utf-8", errors="replace"
+        )
+        phase_paths.append(final_source)
+        if "New chat" not in settled_source:
+            raise WebDriverError(
+                "Packaged desktop did not remain on its usable UI after backend "
+                "and Playwright verification"
+            )
         phase_paths.extend(collect_tauri_runtime_logs(evidence))
 
         evidence.record(
@@ -334,6 +391,7 @@ def first_install(args: argparse.Namespace) -> int:
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 process.kill()
+        cleanup_linux_desktop_backends()
 
 
 def main() -> int:
