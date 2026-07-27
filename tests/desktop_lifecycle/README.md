@@ -8,8 +8,9 @@ to the production application.
 Linux and Windows setup screens are driven through `tauri-driver` against the
 installed application binary. macOS has no native WKWebView WebDriver, so its
 job uses native window input and `screencapture`. The backend web UI is driven
-separately with Playwright after the desktop-owned process reports a valid
-`/api/health` response.
+separately with Playwright by launching the freshly installed CLI in normal
+HTTP UI mode. The desktop-owned process is intentionally `--api-only`; treating
+its expected root 404 as a browser-UI failure would test the wrong contract.
 
 Every job writes an evidence tree containing:
 

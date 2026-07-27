@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved.
 
-"""Small Playwright smoke for a backend started by the packaged desktop app."""
+"""Small Playwright smoke for the installed CLI's HTTP-served browser UI."""
 
 from __future__ import annotations
 
@@ -53,9 +53,41 @@ def main() -> None:
                 f"web UI navigation failed: {None if response is None else response.status}"
             )
         page.locator("body").wait_for(state="visible", timeout=60_000)
+        actions: list[str] = []
+        ephemeral_password = "DesktopAudit-2026!"
+        new_password = page.locator("#new-password")
+        try:
+            new_password.wait_for(state="visible", timeout=15_000)
+        except Exception:
+            pass
+        if new_password.is_visible():
+            new_password.fill(ephemeral_password)
+            page.locator("#confirm-password").fill(ephemeral_password)
+            page.get_by_role("button", name="Change password").click()
+            page.wait_for_function(
+                "() => window.location.pathname !== '/change-password'",
+                timeout=60_000,
+            )
+            actions.append("completed disposable first-run password setup")
+
+        login_password = page.locator("#password")
+        if login_password.is_visible():
+            login_password.fill(ephemeral_password)
+            page.get_by_role("button", name="Login").click()
+            page.wait_for_function(
+                "() => window.location.pathname !== '/login'",
+                timeout=60_000,
+            )
+            actions.append("logged into disposable browser UI")
+
         body_text = page.locator("body").inner_text(timeout=60_000)
         if not body_text.strip():
             raise AssertionError("web UI body is blank")
+        if "/chat" not in page.url or "New chat" not in body_text:
+            raise AssertionError(
+                f"web UI did not reach the chat shell: url={page.url!r}, "
+                f"body={body_text[:500]!r}"
+            )
         page.screenshot(
             path=str(ARTIFACTS / "web-ui.png"),
             full_page=True,
@@ -69,6 +101,7 @@ def main() -> None:
                     "title": page.title(),
                     "body_prefix": body_text[:4000],
                     "page_errors": errors,
+                    "actions": actions,
                 },
                 indent=2,
                 sort_keys=True,
@@ -83,4 +116,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

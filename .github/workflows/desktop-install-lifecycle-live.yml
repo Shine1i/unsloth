@@ -42,17 +42,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake curl git libcurl4-openssl-dev
 
-      - name: Run substituted-bootstrap and destructive-uninstall probes
+      - name: Run concurrent-install and destructive-uninstall probes
         id: probes
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
+          real_home="$HOME"
           disposable_home="$RUNNER_TEMP/p0-home"
           mkdir -p "$disposable_home"
           touch "$disposable_home/.desktop-lifecycle-disposable"
           HOME="$disposable_home" \
-          DESKTOP_LIFECYCLE_REAL_HOME="$HOME" \
+          DESKTOP_LIFECYCLE_REAL_HOME="$real_home" \
             python3 tests/desktop_lifecycle/p0_destructive_probes.py \
               --repo "$GITHUB_WORKSPACE" \
               --evidence "$RUNNER_TEMP/evidence-p0"
@@ -276,13 +277,25 @@ jobs:
           set -euo pipefail
           dmg="$(find studio/src-tauri/target/release/bundle/dmg -type f -name '*.dmg' -print -quit)"
           test -n "$dmg"
-          xcrun stapler validate "$dmg" 2>&1 | tee "$EVIDENCE_DIR/package/dmg-stapler.txt"
+          codesign --verify --verbose=4 "$dmg" 2>&1 \
+            | tee "$EVIDENCE_DIR/package/dmg-codesign.txt"
+          if xcrun stapler validate "$dmg" 2>&1 \
+            | tee "$EVIDENCE_DIR/package/dmg-stapler.txt"; then
+            printf '%s\n' 'outer_dmg_ticket=stapled' \
+              | tee -a "$EVIDENCE_DIR/package/dmg-stapler.txt"
+          else
+            printf '%s\n' \
+              'outer_dmg_ticket=absent; validating the notarized app ticket instead' \
+              | tee -a "$EVIDENCE_DIR/package/dmg-stapler.txt"
+          fi
           mount_point="$RUNNER_TEMP/desktop-lifecycle-dmg"
           mkdir -p "$mount_point"
           hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point" \
             | tee "$EVIDENCE_DIR/package/dmg-attach.txt"
           source_app="$(find "$mount_point" -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$source_app"
+          xcrun stapler validate "$source_app" 2>&1 \
+            | tee "$EVIDENCE_DIR/package/app-stapler.txt"
           destination="/Applications/$(basename "$source_app")"
           sudo ditto "$source_app" "$destination"
           hdiutil detach "$mount_point"
@@ -298,23 +311,65 @@ jobs:
           set -euo pipefail
           python -m pip install 'playwright>=1.55,<1.60'
           if [ "$RUNNER_OS" = Linux ]; then
-            python -m playwright install chromium
+            python -m playwright install --with-deps chromium
           else
             python -m playwright install chromium
           fi
 
-      - name: Install tauri-driver and verify matching native driver
+      - name: Install tauri-driver
         if: runner.os == 'Linux' || runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           cargo install tauri-driver --locked
-          mkdir -p "$EVIDENCE_DIR/package"
-          if [ "$RUNNER_OS" = Windows ]; then
-            command -v msedgedriver
-            msedgedriver --version | tee "$EVIDENCE_DIR/package/msedgedriver-version.txt"
-          fi
           tauri-driver --help
+
+      - name: Match EdgeDriver to the installed WebView2 Runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appGuid = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $registryPaths = @(
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$appGuid",
+            "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$appGuid",
+            "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$appGuid"
+          )
+          $runtime = $null
+          foreach ($registryPath in $registryPaths) {
+            if (Test-Path -LiteralPath $registryPath) {
+              $candidate = (Get-ItemProperty -LiteralPath $registryPath -Name pv).pv
+              if ($candidate) {
+                $runtime = [pscustomobject]@{
+                  version = $candidate
+                  registry_path = $registryPath
+                }
+                break
+              }
+            }
+          }
+          if (-not $runtime) { throw 'WebView2 Runtime version was not found' }
+          $runtime | ConvertTo-Json |
+            Out-File "$env:EVIDENCE_DIR\package\webview2-runtime.json" -Encoding utf8
+
+          $driverDirectory = Join-Path $env:RUNNER_TEMP 'webview2-edgedriver'
+          New-Item -ItemType Directory -Force -Path $driverDirectory | Out-Null
+          $archive = Join-Path $driverDirectory 'edgedriver_win64.zip'
+          $driverUrl = "https://msedgedriver.microsoft.com/$($runtime.version)/edgedriver_win64.zip"
+          Invoke-WebRequest -Uri $driverUrl -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $driverDirectory -Force
+          $driver = Join-Path $driverDirectory 'msedgedriver.exe'
+          if (-not (Test-Path -LiteralPath $driver)) {
+            throw "Matching EdgeDriver missing after extracting $driverUrl"
+          }
+          $driverVersion = (& $driver --version | Out-String).Trim()
+          $driverVersion |
+            Out-File "$env:EVIDENCE_DIR\package\msedgedriver-version.txt" -Encoding utf8
+          if ($driverVersion -notmatch [regex]::Escape($runtime.version)) {
+            throw "EdgeDriver $driverVersion does not match WebView2 $($runtime.version)"
+          }
+          "TAURI_NATIVE_DRIVER=$driver" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Drive Linux packaged setup and verify backend/web UI
         id: linux_flow
@@ -379,6 +434,7 @@ jobs:
             --application "$env:DESKTOP_APPLICATION" `
             --scenario '${{ matrix.scenario }}' `
             --evidence "$env:EVIDENCE_DIR\live" `
+            --native-driver "$env:TAURI_NATIVE_DRIVER" `
             --playwright-smoke tests/desktop_lifecycle/playwright_web_smoke.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import EvidenceRun  # noqa: E402
+from common import EvidenceRun, run_installed_web_ui_smoke  # noqa: E402
 
 
 def osascript(script: str) -> str:
@@ -183,25 +183,13 @@ def main() -> int:
             ]
         )
         if args.playwright_smoke:
-            completed = evidence.run(
-                [sys.executable, args.playwright_smoke],
-                name="playwright-web-ui",
-                env={
-                    "BASE_URL": f"http://127.0.0.1:{port}",
-                    "PW_ART_DIR": str(evidence.screenshots_dir / "playwright"),
-                },
-                timeout=600,
-                check=False,
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    f"backend healthy but Playwright smoke exited {completed.returncode}"
-                )
+            paths.extend(run_installed_web_ui_smoke(evidence, args.playwright_smoke))
         evidence.record(
             args.scenario,
             "verified",
             f"Notarized DMG app was copied, launched by a real user action, setup was "
-            f"clicked at observed window coordinates, and backend became healthy on {port}.",
+            f"clicked at observed window coordinates, its API backend became healthy "
+            f"on {port}, and the installed CLI's browser UI passed Playwright.",
             evidence=[path.relative_to(args.evidence) for path in paths],
         )
         return 0
@@ -236,4 +224,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

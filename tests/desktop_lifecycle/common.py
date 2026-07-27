@@ -17,9 +17,11 @@ import os
 import platform
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +76,138 @@ def sha256_file(path: Path) -> str:
 
 def safe_environment() -> dict[str, str]:
     return {key: os.environ[key] for key in SAFE_ENV_KEYS if key in os.environ}
+
+
+def resolve_installed_cli() -> Path:
+    home = Path.home()
+    candidates = [
+        home / ".local" / "bin" / "unsloth",
+        home / ".local" / "bin" / "unsloth.exe",
+        home / ".unsloth" / "studio" / "bin" / "unsloth.exe",
+        home / ".unsloth" / "studio" / "unsloth_studio" / "bin" / "unsloth",
+        home / ".unsloth" / "studio" / "unsloth_studio" / "Scripts" / "unsloth.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    found = shutil.which("unsloth")
+    if found:
+        return Path(found).resolve()
+    raise FileNotFoundError(
+        "Installed Unsloth CLI not found; checked " + ", ".join(map(str, candidates))
+    )
+
+
+def run_installed_web_ui_smoke(
+    evidence: "EvidenceRun",
+    playwright_script: str | Path,
+    *,
+    port: int = 18892,
+    timeout: float = 300,
+) -> list[Path]:
+    """Launch the installed browser UI and exercise it through Playwright.
+
+    The packaged desktop intentionally owns an API-only backend, so its embedded
+    UI is driven by Tauri WebDriver/native input. This separate process verifies
+    the same freshly installed CLI's real HTTP-served UI without treating the
+    API-only backend's expected root 404 as a product failure.
+    """
+
+    cli = resolve_installed_cli()
+    command = [
+        str(cli),
+        "studio",
+        "-H",
+        "127.0.0.1",
+        "-p",
+        str(port),
+        "--disable-tools",
+    ]
+    command_path = evidence.output_dir / "browser-ui-command.txt"
+    command_path.write_text(quote_command(command) + "\n", encoding="utf-8")
+    server_log = evidence.logs_dir / "installed-browser-ui.log"
+    environment = os.environ.copy()
+    environment["UNSLOTH_SKIP_UPDATE_CHECK"] = "1"
+    creationflags = (
+        subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    )
+    with server_log.open("w", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            command,
+            env=environment,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=os.name != "nt",
+            creationflags=creationflags,
+        )
+        try:
+            deadline = time.monotonic() + timeout
+            health: dict[str, Any] | None = None
+            last_error: Exception | None = None
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise RuntimeError(
+                        f"Installed browser UI exited {process.returncode}; see {server_log}"
+                    )
+                try:
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/api/health", timeout=3
+                    ) as response:
+                        candidate = json.loads(
+                            response.read().decode("utf-8", errors="replace")
+                        )
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/", timeout=3
+                    ) as response:
+                        root_status = response.status
+                    if candidate.get("status") == "healthy" and root_status < 400:
+                        health = candidate
+                        break
+                except Exception as error:
+                    last_error = error
+                time.sleep(1)
+            if health is None:
+                raise RuntimeError(f"Installed browser UI health timeout: {last_error}")
+            health_path = evidence.output_dir / "browser-ui-health.json"
+            health_path.write_text(
+                json.dumps(health, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            artifact_dir = evidence.screenshots_dir / "playwright"
+            completed = evidence.run(
+                [sys.executable, str(playwright_script)],
+                name="playwright-installed-web-ui",
+                env={
+                    "BASE_URL": f"http://127.0.0.1:{port}",
+                    "PW_ART_DIR": str(artifact_dir),
+                },
+                timeout=600,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"Installed browser UI Playwright smoke failed with "
+                    f"{completed.returncode}"
+                )
+            return [
+                command_path,
+                server_log,
+                health_path,
+                artifact_dir / "health.json",
+                artifact_dir / "page.json",
+                artifact_dir / "web-ui.png",
+                evidence.logs_dir / "playwright-installed-web-ui.log",
+            ]
+        finally:
+            if process.poll() is None:
+                if os.name == "nt":
+                    process.terminate()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    process.kill()
 
 
 def machine_facts() -> dict[str, Any]:
@@ -348,4 +482,3 @@ class EvidenceRun:
             "commands": [asdict(command) for command in self.commands],
         }
         self._write_json("results.json", payload)
-

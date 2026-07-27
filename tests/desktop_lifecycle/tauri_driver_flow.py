@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import EvidenceRun  # noqa: E402
+from common import EvidenceRun, run_installed_web_ui_smoke  # noqa: E402
 
 
 class WebDriverError(RuntimeError):
@@ -188,14 +188,35 @@ def wait_for_text(
     raise WebDriverError(f"Timed out waiting for {text!r}; last source: {last_source[:1000]}")
 
 
+def collect_tauri_runtime_logs(evidence: EvidenceRun) -> list[Path]:
+    collected: list[Path] = []
+    candidates = [
+        Path.home() / ".unsloth" / "studio" / "tauri.log",
+        Path.home() / ".local" / "share" / "unsloth" / "tauri.log",
+    ]
+    for index, source in enumerate(candidates, start=1):
+        if not source.is_file():
+            continue
+        destination = evidence.logs_dir / f"tauri-runtime-{index}.log"
+        try:
+            shutil.copy2(source, destination)
+        except OSError:
+            continue
+        collected.append(destination)
+    return collected
+
+
 def first_install(args: argparse.Namespace) -> int:
     output = Path(args.evidence).resolve()
     evidence = EvidenceRun(output, f"{args.scenario}-tauri-first-install")
     evidence.begin(args.scenario)
     driver_log = evidence.logs_dir / "tauri-driver.log"
+    driver_command = [args.tauri_driver, "--port", str(args.port)]
+    if args.native_driver:
+        driver_command.extend(["--native-driver", args.native_driver])
     with driver_log.open("w", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
-            [args.tauri_driver, "--port", str(args.port)],
+            driver_command,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             text=True,
@@ -262,33 +283,22 @@ def first_install(args: argparse.Namespace) -> int:
         phase_paths.extend([process_path, tree_path])
 
         if args.playwright_smoke:
-            env = {
-                "BASE_URL": f"http://127.0.0.1:{port}",
-                "PW_ART_DIR": str(evidence.screenshots_dir / "playwright"),
-            }
-            completed = evidence.run(
-                [sys.executable, args.playwright_smoke],
-                name="playwright-web-ui",
-                env=env,
-                timeout=600,
-                check=False,
+            phase_paths.extend(
+                run_installed_web_ui_smoke(evidence, args.playwright_smoke)
             )
-            if completed.returncode != 0:
-                raise WebDriverError(
-                    f"Backend was healthy but Playwright UI smoke failed with "
-                    f"{completed.returncode}"
-                )
-            phase_paths.append(evidence.logs_dir / "playwright-web-ui.log")
+        phase_paths.extend(collect_tauri_runtime_logs(evidence))
 
         evidence.record(
             args.scenario,
             "verified",
             f"Installed package launched, Get Started was clicked through WebDriver, "
-            f"and the owned backend became healthy on port {port}.",
+            f"the owned API backend became healthy on port {port}, and the same "
+            f"installed CLI's browser UI passed Playwright.",
             evidence=[path.relative_to(output) for path in phase_paths],
         )
         return 0
     except Exception as error:
+        phase_paths.extend(collect_tauri_runtime_logs(evidence))
         try:
             failure_shot = evidence.screenshots_dir / "99-failure.png"
             capture_desktop_screenshot(driver, failure_shot)
@@ -332,6 +342,7 @@ def main() -> int:
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--tauri-driver", default="tauri-driver")
+    parser.add_argument("--native-driver")
     parser.add_argument("--port", type=int, default=4444)
     parser.add_argument("--install-timeout", type=float, default=7200)
     parser.add_argument("--playwright-smoke")
