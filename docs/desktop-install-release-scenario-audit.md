@@ -23,6 +23,194 @@ Important P1 findings include: desktop intentionally ignores custom `UNSLOTH_STU
 
 This audit specifies 60 representative scenarios. It does not claim runtime proof where only code inspection is possible. “Desired” behavior is deliberately separated from “current” behavior.
 
+## Live verification addendum — 2026-07-27
+
+This addendum records destructive and packaged end-to-end execution performed
+after the static audit. The source analysis below remains tied to
+`3fd948eb952e417c7604a9422a55f7fb130a72cf`; the hosted matrix tested fork
+branch `test-taur` at `45706fa7475ee175418855fa5174bb29329beba7`.
+Follow-up test-only commits harden native click detection (`720894deb`), add
+P2 coexistence/owner-metadata coverage (`8ae927992`), and allow targeted hosted
+platform reruns (`27aa28dd5`). Fixture restoration is `a077416c0`; Windows
+helper-window filtering is `cbd620619`.
+No production application code was changed. Cybersecurity-focused probes were
+excluded at the request of the test operator: `PKG-04`, `PKG-05`, `INST-11`,
+`INST-13`, and `INST-14`.
+
+Live statuses mean:
+
+- **verified** — the desired invariant was observed with real packaged
+  binaries/processes;
+- **failed** — the live behavior contradicted the desired invariant;
+- **not reproducible** — the required condition was created faithfully, but
+  the reported behavior did not occur;
+- **blocked** — the row needs a fixture, hardware/policy host, or fault
+  environment that was not truthfully available, or was deliberately excluded
+  by the operator's scope.
+
+### Live environments, artifacts, and evidence
+
+| Environment | Exact artifact/revision | Driver and evidence |
+|---|---|---|
+| Disposable local Linux | Distrobox `unsloth-desktop-audit-20260727124231`; Ubuntu 22.04.5; disposable home `/tmp/unsloth-distrobox-home.yX6WBC`; host kernel `7.1.4-1-cachyos` x86_64 | Real X11/Xvfb/WebKitGTK window, `tauri-driver`, native `xdotool`/Openbox input, `scrot`, real processes/ports/filesystem, and Playwright against the separately launched installed CLI web UI. |
+| Local `.deb` | `Unsloth Studio (Desktop)_2026.4.8_amd64.deb`; SHA-256 `4ba62d66ae4f21a3426781e3795b7ffb157151f7701495e3a00aff0d77d70891` | Installed with `sudo dpkg -i`; removed/reinstalled with exact `dpkg` commands recorded below. |
+| Local AppImage | `Unsloth Studio (Desktop)_2026.4.8_amd64.AppImage`; SHA-256 `c271233e0f3b0bfcc9b72a2c0cdf8b60d3b1ea348273db580b5fd759d452a9e3` | Executed in both package-switch directions with `APPIMAGE_EXTRACT_AND_RUN=1`. |
+| Hosted signed packages, attempt 2 | Fork Actions run [`30261429281`](https://github.com/wasimysaid/unsloth/actions/runs/30261429281), exact SHA `afafaf9de9731b658cd1fc6e6d3f82d16e1a5f65`; artifacts `desktop-lifecycle-p0-linux-1`, `desktop-lifecycle-Linux-X64-1`, and `desktop-lifecycle-Windows-X64-1` | GitHub-hosted Ubuntu 22.04, Windows, and macOS 14; signed NSIS, signed Linux packages, notarized/stapled app inside the DMG; screenshots, package hashes, logs, process/filesystem snapshots, health, and Playwright are uploaded even when the release gate fails. The run was cancelled after its known-bad macOS click coordinates and Linux backend contamination were diagnosed. |
+| Corrected hosted rerun | Fork Actions run [`30264203203`](https://github.com/wasimysaid/unsloth/actions/runs/30264203203), exact SHA `45706fa7475ee175418855fa5174bb29329beba7`; jobs `89970971731` (Windows), `89970971826` (P0), `89970971836` (Linux), and `89970971871` (macOS) | The P0, Ubuntu 22.04, and macOS 14.8.7 ARM64 jobs completed. Evidence artifacts are `8652107650` / `desktop-lifecycle-p0-linux-1`, `8652433793` / `desktop-lifecycle-Linux-X64-1`, and `8652375699` / `desktop-lifecycle-macOS-ARM64-1`. Windows artifact `8654264487` proved that the old automation selected a transient 16×16 HWND and clicked off-screen; the run was cancelled after one hour without setup. This is a harness failure, not a product disposition. Superseded run `30264017313` was cancelled before jobs started. |
+| Targeted Windows rerun | Fork Actions run [`30269853548`](https://github.com/wasimysaid/unsloth/actions/runs/30269853548), exact SHA `cbd620619dcb8e722fad9d13fd7c20e01e7ca20a`; successful Windows job `89989436010`; artifact `8655031621` / `desktop-lifecycle-Windows-X64-1` | Windows Server 2025 x64 built and silently installed the signed NSIS, ignored transient helper HWNDs, clicked the real 776×569 setup window at `(512,556)`, completed the CPU install, reached healthy backend 8888 and usable native UI, and passed Playwright against the separately launched installed CLI UI. Authenticode was Valid for `Unsloth AI Inc.`; NSIS SHA-256 `d074aaaff46364f7a6f074db3773374f153bda460d9ec495155ca3ba878d0008`. |
+
+Authoritative local evidence directories (each contains `environment.json`,
+`results.json`, exact logs, UI source where WebDriver was usable, screenshots,
+process snapshots, and focused filesystem snapshots):
+
+| Suite | Evidence directory | Scenarios |
+|---|---|---|
+| Runtime | `/tmp/unsloth-distrobox-home.yX6WBC/linux-runtime-live-20260727-r3` | `RUN-01`, `RUN-02`, `RUN-04`, `RUN-10` |
+| Coexistence | `/tmp/unsloth-distrobox-home.yX6WBC/linux-coexistence-20260727-r2` | `COEX-04`, `COEX-05`, `COEX-08`, `COEX-09` |
+| Default/custom/PATH coexistence | `/tmp/unsloth-distrobox-home.yX6WBC/linux-coexistence-20260727-r5` | `COEX-06`, `COEX-07`; it also reproduced the authoritative `COEX-04`, `COEX-05`, and `COEX-08` failures, then restored the package's initially absent root ID |
+| Owner-metadata recovery | `/tmp/unsloth-distrobox-home.yX6WBC/linux-owner-metadata-20260727-r1` | `RUN-03`; deliberately truncated JSON with the manual valid-root fixture |
+| Package transition | `/tmp/unsloth-distrobox-home.yX6WBC/linux-package-transitions-20260727-r2` | `UN-01`, `UN-03`, `UN-04`, `UN-06` |
+| Loader/filesystem faults | `/tmp/unsloth-distrobox-home.yX6WBC/linux-faults-20260727-r2` | `PKG-06`, `INST-10` |
+| Native close/reopen | `/tmp/unsloth-distrobox-home.yX6WBC/linux-window-close-20260727-r4` | `RUN-06` |
+| Destructive P0 | Run `30264203203`, artifact `8652107650` / `desktop-lifecycle-p0-linux-1` | `INST-07`, `UN-02` |
+
+The commands are implemented and documented under
+`tests/desktop_lifecycle/`. The destructive commands captured verbatim include
+`sudo dpkg -r unsloth-studio-desktop`, reinstall of the exact deb,
+temporarily moving
+`/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0`, executing
+`/usr/bin/unsloth-studio`, and restoring the same library link. RUN-06 used
+native clicks at the observed 760×560 window coordinates: Get Started at
+`930,862` and the close control at `1286,407`. All local mutations were
+confined to the marked Distrobox home/container; the original managed root,
+deb package, WebKit symlink, permissions, and process state were restored.
+
+### P0/P1 live disposition
+
+| Scenario | Priority | Live status | Exact observed result or blocker |
+|---|---:|---|---|
+| PKG-01 | P0 | **verified** | Targeted run `30269853548`, job `89989436010`, built and silently installed an Authenticode-Valid NSIS signed by `Unsloth AI Inc.`. Native automation ignored transient helper HWNDs, observed the real 776×569 Get Started window at `(124,75)`, clicked `(512,556)`, captured visible install progress, reached healthy backend 8888 and usable native “New chat,” and passed Playwright against the separately launched installed CLI UI. Artifact `8655031621`; NSIS SHA-256 `d074aaaff46364f7a6f074db3773374f153bda460d9ec495155ca3ba878d0008`. The earlier 16×16 selection in run `30264203203` remains classified as a harness failure, not a product result. |
+| PKG-02 | P0 | **verified** | Job `89970971871` copied the signed/notarized app from the real DMG, Gatekeeper accepted it as Notarized Developer ID, native automation clicked setup in the observed window, the backend became healthy on 8888, the installed CLI UI passed Playwright, and the final native window showed usable “New chat.” Artifact `8652375699`; DMG SHA-256 `a93eb1dd117a64088934091273a4b987031a0baae87561400e73ffce4c1ad7a0`. |
+| PKG-03 | P0 | **failed** | Job `89970971836` isolated fresh `.deb` and AppImage homes. AppImage completed setup, healthy backend, installed-CLI Playwright, and final “New chat.” The required `.deb` completed the same setup/backend/browser checks but its native process then reproducibly aborted with XCB “XInitThreads has not been called” / `poll_for_event` assertion; the final WebDriver session was gone and screenshots were black. Artifact `8652433793`; deb SHA-256 `ca5de746313111c1f88954f2c3f30ff9746e88837b51b288c897bd27eb833992`; AppImage SHA-256 `5ea50fa0c41e942e1a84e7d50a5380802e48ae29569a42263421b4f5d2f73b9c`. |
+| PKG-04 | P0 | blocked | Excluded by operator request because corrupt/substituted update is cybersecurity-focused. |
+| INST-07 | P0 | **failed** | Two live copies of the installer's exact venv replacement transaction cross-wrote one root. Installer A wrote through `VENV_DIR` after B renamed/replaced it; final generation was B but contained both A's late mutation and B's mutation. No cross-process root lock exists. |
+| INST-11 | P0 | blocked | Excluded by operator request because SAC/WDAC policy enforcement is cybersecurity-focused. |
+| INST-14 | P0 | blocked | Excluded by operator request because bootstrap/download integrity is cybersecurity-focused. |
+| UN-02 | P0 | **failed** | The documented full uninstaller exited 0 and deleted every seeded Studio-local category: auth, database, models, outputs, rollback, and uploads, without a category choice. |
+| PKG-05 | P1 | blocked | Excluded by operator request because reputation/quarantine policy is cybersecurity-focused. |
+| PKG-06 | P1 | **failed** | With the WebKitGTK runtime link withheld, the real installed app exited 127 before managed-state mutation. Only loader text was emitted; a desktop-entry launch had no native actionable error UI. |
+| COEX-02 | P1 | blocked | No truthful historical desktop/backend package fixture at the required old protocol/capability floor was available. |
+| COEX-04 | P1 | **failed** | The packaged installation omitted `share/studio_install_id`; the backend health root ID was empty, yet preflight declared the partial environment ready and displayed normal “New chat” UI instead of repair. |
+| COEX-05 | P1 | **failed** | With only a healthy custom root and `UNSLOTH_STUDIO_HOME` set, desktop scrubbed/ignored it, showed Get Started for a second default install, and gave no warning or consent choice. The custom canary and ID were unchanged. |
+| COEX-08 | P1 | **failed** | A live foreign-root backend survived on 8888 and desktop safely started the default-root backend on 8889, but the UI did not disclose the second root/backend. Process and port isolation passed. |
+| COEX-09 | P1 | **verified** | After seeding the valid default-root ID needed to exercise the intended contract, desktop attached to the one ownerless same-root terminal backend. It did not spawn a duplicate and did not kill the external backend on desktop exit. |
+| COEX-10 | P1 | blocked | A real stale but launchable same-root backend fixture was unavailable; changing current health JSON would not be equivalent to an old packaged backend. |
+| INST-03 | P1 | blocked | The Distrobox saw host NVIDIA devices but not a trustworthy driver/runtime pair, while hosted runners were CPU-only. No dedicated physical NVIDIA row was available. |
+| INST-05 | P1 | blocked | The disposable X11 container had all prerequisites and no representative graphical polkit/elevation agent; fabricating the UI result without real privileged resume was rejected. |
+| INST-10 | P1 | **failed** | On a mode-0555 default root, `uv` returned 2 for EACCES. Tauri treated every exit 2 as apt elevation and rendered “Permission needed” with an empty package list instead of the read-only path error. The prior root/canary was preserved and no CLI was committed. |
+| INST-13 | P1 | blocked | Excluded by operator request because antivirus quarantine/file locking is cybersecurity-focused. |
+| INST-15 | P1 | blocked | No authenticated proxy/TLS interception/rate-limit fault service or complete offline artifact fixture was available; a simple network cut would not cover the documented matrix. |
+| RUN-01 | P1 | **verified** | With a real unrelated HTTP listener on 8888, desktop started a healthy API-only backend on 8889 and reached usable UI. |
+| RUN-04 | P1 | **failed** | Actual Tauri setup never created `run/desktop_backend.json` because the packaged install also lacked the root ID; after a shell crash there was no ownership record from which to prove adoption. |
+| RUN-06 | P1 | **failed** | A real close-button click hid the active setup window while installer PID 193436 continued. A second launch reopened the same window, but there was no continue-in-background/cancel confirmation or visible background-progress disclosure. |
+| RUN-07 | P1 | blocked | The documented row requires deterministic kills at every transaction marker and a real prior-version fixture. An arbitrary SIGKILL during a fast cached install would not establish phase-complete rollback coverage. |
+| RUN-10 | P1 | **verified** | Killing the exact healthy backend caused the three-poll watchdog UI (“Something went wrong / Server stopped unexpectedly / Retry”); Retry launched a new healthy PID on the same fallback port. |
+| UPD-02 | P1 | blocked | No old signed package plus valid new native-update artifact/failing shell-install endpoint was available. The hosted build also reported that the supplied updater private key did not match the configured public key, so a truthful native update could not be staged. |
+| UPD-03 | P1 | blocked | No controlled failing backend package index/update endpoint with a preserved prior signed shell fixture was available. |
+| UPD-06 | P1 | blocked | No N-1/N/N+1 signed shell/backend protocol and data-schema fixture set was available. |
+| UPD-07 | P1 | **failed** | The live `INST-07` transaction showed the shared root replacement primitive is not cross-process serialized. Native update and CLI repair use that same root boundary, so the documented updater/installer race has no lock that could prevent the reproduced cross-write. This is a direct shared-primitive result, not a completed signed native-update run. |
+| UN-03 | P1 | **failed** | `sudo dpkg -r unsloth-studio-desktop` removed package files while real Tauri PID 177270 and backend PID 177443 were active; both processes remained alive. Managed data was preserved. |
+| UN-04 | P1 | **failed** | Real deb→AppImage and AppImage→deb launches both honored single-instance behavior, but neither disclosed package migration and both stale launchers remained usable. |
+
+### Feasible P2 results and cross-cutting mismatches
+
+`COEX-06`, `COEX-07`, `RUN-02`, `RUN-03`, `UN-01`, and `UN-06` are
+**verified**. Desktop deterministically chose the healthy default root when a
+healthy custom root, both custom-root environment variables, and a
+custom-root-first PATH were present; the custom canary and ID were unchanged.
+It replaced deliberately truncated owner JSON with a live record. The
+unrelated listener was never adopted or killed; native deb removal preserved
+the seeded managed-data canary; and reinstalling the exact deb reused the
+preserved state. The two-direction package and RUN-06 secondary launches also
+exercised the single-instance invariant from `RUN-05` without creating a
+second backend, although the dedicated same-package row was not separately
+recorded.
+
+The hosted Linux package logs additionally verify the CPU-only branch from
+`INST-02`, and the macOS installed-CLI logs identify and use MLX on Apple
+Silicon for the baseline `INST-04` row. The explicit no-torch variation and
+corporate-TLS pairwise remain unexecuted.
+
+All P2 rows have the following live disposition:
+
+| Scenario | Live status | Exact result or limitation |
+|---|---|---|
+| PKG-07 | blocked | The corrected macOS job copied and ejected the DMG before launch; direct mounted/translocated launch needs a separately retained signed DMG workspace. |
+| PKG-08 | blocked | GitHub-hosted Windows was x64; no Windows ARM64 runner or ARM64 desktop artifact exists. |
+| PKG-09 | blocked | The only desktop artifact and runner were Apple Silicon; the Intel target remains disabled. |
+| PKG-10 | blocked | Hosted Ubuntu had FUSE/X11 and the local container had X11; no truthful no-FUSE, Wayland/Mesa, noexec, or non-apt package host was available. The missing-loader row is recorded separately as failed `PKG-06`. |
+| COEX-01 | **verified** | The valid default-root fixture was reused without package reinstall and started the default CLI/backend in the `RUN-03` owner-recovery run. |
+| COEX-03 | blocked | No authentic legacy `.venv` package generation was available; merely renaming the current venv would not cover historical migration compatibility. |
+| COEX-06 | **verified** | With valid default and custom roots plus both custom-root variables, desktop started the default root ID on 8888 and left the custom ID/canary unchanged. |
+| COEX-07 | **verified** | With the custom-root CLI first on PATH, desktop still started its explicit default-root executable and left the other install unchanged. |
+| COEX-11 | blocked | GitHub-hosted Windows does not provide a nested WSL installation fixture. |
+| COEX-12 | blocked | No paired native-Windows/WSL environment with a forwarded-port collision was available. |
+| INST-01 | **verified** | The real packaged Windows flow installed uv, created the managed Python 3.13 environment, selected CPU-only PyTorch, installed Unsloth and Studio dependencies plus the validated prebuilt llama.cpp bundle, completed setup, and started healthy backend 8888. The native and installed-CLI UIs were both usable. The missing root identity is recorded independently under `COEX-04`/`RUN-04`. |
+| INST-02 | **verified** | The isolated hosted Linux package flow selected `gpu_branch=cpu`, installed CPU-only PyTorch, completed setup, and produced a usable AppImage UI. The explicit `--no-torch` variation remains unexecuted. |
+| INST-04 | **verified** | The macOS ARM64 packaged flow completed setup and its installed CLI detected `MLX — Apple Silicon (arm64)`; the corporate-TLS variation remains blocked with `INST-15`. |
+| INST-06 | blocked | No representative native decline/no-sudo/non-apt UI fixture was available; the container lacked a graphical elevation agent rather than exposing a truthful decline flow. |
+| INST-08 | blocked | Hosted standard profiles and the disposable ASCII path did not provide the required Unicode/metacharacter/long-profile pairwise. |
+| INST-09 | blocked | GitHub-hosted profiles could not be removed or redirected to a representative network/other-drive home without invalidating the runner itself. |
+| INST-12 | blocked | Disabling PowerShell or enforcing an enterprise execution policy is unavailable on the hosted Windows runner. |
+| RUN-02 | **verified** | A real unrelated HTTP listener survived desktop fallback startup and teardown without adoption or termination. |
+| RUN-03 | **verified** | Desktop replaced deliberately truncated `desktop_backend.json` with a valid live owner record and reached usable UI. |
+| RUN-05 | **verified** | Real secondary launches in both package-switch directions and during hidden setup focused/reopened the existing instance without a second backend. |
+| RUN-08 | blocked | Hosted runners and the container cannot suspend and resume while retaining the automation connection. |
+| RUN-09 | blocked | No persistent reboot/logout checkpoint runner with the installed state and evidence channel was available. |
+| UPD-01 | blocked | No controlled N→N+1 backend package/index fixture was available; running the same current package would not prove an update. |
+| UPD-04 | blocked | No valid old signed app/new signed updater pair was available, and the hosted signing secret did not match the configured updater public key. |
+| UPD-05 | blocked | Only one deb version was built, so the N→N+1 manual package-update handoff could not be observed. |
+| UN-01 | **verified** | Real `dpkg -r` preserved the seeded managed-data canary and managed environment. |
+| UN-05 | blocked | No owned historical custom-root/dual-WSL shortcut fixture existed; the custom-root coexistence fixture was deliberately not misrepresented as a full-uninstall ownership marker. |
+| UN-06 | **verified** | Reinstalling the exact deb after native removal succeeded and reused the preserved managed state. |
+
+The most consequential new cross-cutting defect is the missing packaged root
+identity. Tauri-mode `install.sh` skips the shortcut routine that creates
+`~/.unsloth/studio/share/studio_install_id`. The local deb and corrected
+hosted Linux, macOS, and Windows installs consequently reported
+`studio_root_id: ""`; the Windows artifact also recorded the entire `share`
+directory as absent. Tauri did not publish
+`run/desktop_backend.json`. `COEX-09` was run only after explicitly seeding a
+64-hex ID so the downstream intended attachment contract could be tested; that
+manual fixture is recorded and is not evidence that packaged setup created the
+ID.
+
+Attempt 2's hosted Linux result must not be counted as verified despite its
+initial `results.json`: after the backend and separate browser Playwright
+passed, the native log ended with an XCB/XInitThreads assertion and its final
+screenshot was black. The corrected harness re-queries the native page and
+requires “New chat” after Playwright. The corrected run reproduced the deb
+abort even with WebKit compositing disabled, while its isolated AppImage flow
+passed. This makes the aggregate required Linux package row failed; it is not a
+surviving-backend harness false positive.
+
+### Live release-gate outcome
+
+Final live disposition across all 60 scenarios is **16 verified, 13 failed,
+0 not reproducible, and 31 blocked**. The targeted signed Windows package flow
+passed; the excluded cybersecurity rows and unavailable hardware/fault/update
+fixtures remain explicitly blocked rather than being counted as passes.
+
+The release remains blocked. The exact failing hosted jobs in corrected run
+`30264203203` are P0 job `89970971826` (`INST-07`, `UN-02`) and Linux job
+`89970971836` (`PKG-03` deb failure; AppImage passed). Local installed-package
+failures additionally confirm `PKG-06`, `COEX-04`, `COEX-05`, `COEX-08`,
+`INST-10`, `RUN-04`, `RUN-06`, `UPD-07`, `UN-03`, and `UN-04`. The common
+root-identity defect—packaged setup omits `share/studio_install_id` and
+therefore owner metadata—explains `COEX-04` and the packaged `RUN-04` failure,
+but does not explain the independent transaction, uninstall, loader,
+filesystem-error, disclosure, or Linux XCB failures.
+
 ## 2. Scope and repository revision
 
 The exact audited revision is `3fd948eb952e417c7604a9422a55f7fb130a72cf` on branch `test-taur`. The worktree was clean before this document was added.
@@ -157,7 +345,7 @@ The principal transition sources are also concrete. Removing or never creating b
 ### Backend identity and ownership
 
 - Candidate ports are 8888–8908 (`desktop_backend_owner.rs:135-137`).
-- Root identity is a lowercase 64-hex ID at `~/.unsloth/studio/studio-install-id`; run metadata is `run/desktop_backend.json`; auth secret is `auth/.desktop_secret` (`desktop_backend_owner.rs:139-190`).
+- Root identity is a lowercase 64-hex ID at `~/.unsloth/studio/share/studio_install_id`; run metadata is `run/desktop_backend.json`; auth secret is `auth/.desktop_secret` (`desktop_backend_owner.rs:139-190`).
 - Owner metadata contains app PID, backend PID, generation, requested/reported port, root ID, kind, and token hash. Private files are atomically written with restrictive Unix permissions (`desktop_backend_owner.rs:215-383`).
 - Lifecycle control requires protocol, manageability, auth, ownership, exact root, and owner token. Adopted shutdown uses authenticated exact-port HTTP; it refuses unsafe PID fallback (`desktop_backend_owner.rs:523-721,828-914`; `process.rs:1086-1210`).
 - A foreign valid root is currently `BackendProbe::Old`, not `ExternalConflict` (`preflight/backend.rs:218-230`). If the managed install is ready, `choose_preflight` ignores that “old” probe and starts another backend on a fallback port. This is a deliberate code result but an unresolved product choice (`COEX-08`).
@@ -223,7 +411,7 @@ The desktop's default-root isolation is visible in `process.rs:359-387`, environ
 | Category | Actual path/owner | Install/update/repair | Native package uninstall | Full-uninstall scripts |
 |---|---|---|---|---|
 | Managed Python environment | `~/.unsloth/studio/unsloth_studio` (or legacy `.venv`) | Replaced transactionally; prior venv rollback. | Preserved. | Removed. |
-| Root identity/owner metadata | `studio-install-id`, `run/desktop_backend.json` | Preserved/recreated; stale run metadata may be cleared. | Preserved unless app exit cleanup removes live owner record. | Removed with root. |
+| Root identity/owner metadata | `share/studio_install_id`, `run/desktop_backend.json` | Preserved/recreated; stale run metadata may be cleared. | Preserved unless app exit cleanup removes live owner record. | Removed with root. |
 | Backend authentication | `~/.unsloth/studio/auth/auth.db`, `.desktop_secret`; application auth DB | Preserved; desktop secret may be provisioned/rotated; password reset clears it. | Preserved. | Removed. |
 | Main application DB/settings | `~/.unsloth/studio/studio.db` | Preserved; schema migration is backend-owned and not desktop-gated. | Preserved. | Removed. |
 | RAG | `~/.unsloth/studio/rag/rag.db`, uploads | Preserved. | Preserved. | Removed. |
