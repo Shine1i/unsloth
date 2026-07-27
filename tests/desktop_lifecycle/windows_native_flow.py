@@ -175,9 +175,11 @@ def main() -> int:
         )
         paths.append(click_path)
         setup_deadline = time.monotonic() + 90
-        managed_root = Path.home() / ".unsloth" / "studio"
+        managed_environment = (
+            Path.home() / ".unsloth" / "studio" / "unsloth_studio"
+        )
         while time.monotonic() < setup_deadline:
-            if managed_root.exists() or candidate_health() is not None:
+            if managed_environment.exists() or candidate_health() is not None:
                 break
             if process.poll() is not None:
                 raise RuntimeError(
@@ -186,7 +188,7 @@ def main() -> int:
             time.sleep(1)
         else:
             raise RuntimeError(
-                "native click did not start setup or create the managed root"
+                "native click did not start setup or create the managed environment"
             )
         time.sleep(3)
         if process.poll() is not None:
