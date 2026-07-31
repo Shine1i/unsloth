@@ -99,8 +99,6 @@ jobs:
       - name: Pin linuxdeploy and build the real AppImage
         env:
           XDG_CACHE_HOME: ${{ runner.temp }}/tauri-tools-cache
-          TAURI_SIGNING_PRIVATE_KEY: ''
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         run: |
           set -euo pipefail
           mkdir -p "$XDG_CACHE_HOME/tauri"
