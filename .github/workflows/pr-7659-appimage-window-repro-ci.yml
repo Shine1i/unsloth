@@ -105,9 +105,16 @@ jobs:
           curl -fsSL https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage -o "$XDG_CACHE_HOME/tauri/linuxdeploy-x86_64.AppImage"
           echo '4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a  '"$XDG_CACHE_HOME/tauri/linuxdeploy-x86_64.AppImage" | sha256sum -c -
           chmod +x "$XDG_CACHE_HOME/tauri/linuxdeploy-x86_64.AppImage"
+          # The repo enables updater artifacts globally; this disposable unsigned CI build
+          # intentionally accepts the expected post-bundle signing error only when the
+          # requested AppImage was actually produced.
+          set +e
           npx --prefix studio tauri build --bundles appimage
+          build_rc=$?
+          set -e
           APPIMAGE="$(find studio/src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -type f | head -1)"
-          test -n "$APPIMAGE"
+          test -n "$APPIMAGE" || exit "$build_rc"
+          if (( build_rc != 0 )); then echo "Unsigned repro: accepting post-bundle updater signing rc=$build_rc"; fi
           cp "$APPIMAGE" ./Unsloth-Studio-PR-7659.AppImage
           chmod +x ./Unsloth-Studio-PR-7659.AppImage
           sha256sum ./Unsloth-Studio-PR-7659.AppImage | tee appimage-sha256.txt
