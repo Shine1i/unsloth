@@ -152,11 +152,9 @@ jobs:
                   break
                 fi
               fi
-              if ! kill -0 "$APP_WRAPPER_PID" 2>/dev/null; then
-                echo "FAIL $label: actual Tauri desktop exited before its backend became healthy"
-                cat "$case_log"
-                return 1
-              fi
+              # dbus-run-session may not remain as the long-lived wrapper on
+              # every runner image. The ownership file's app_pid is the actual
+              # Tauri process and is the authoritative liveness check above.
               sleep 0.5
             done
 
