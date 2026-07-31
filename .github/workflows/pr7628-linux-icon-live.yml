@@ -1,0 +1,119 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 7628 Linux Icon Live E2E"
+
+on:
+  push:
+    branches:
+      - "pr-7628-macos-icon-repro-ci-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Use an isolated consumer home"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr7628-home" logs
+          echo "HOME=$RUNNER_TEMP/pr7628-home" >> "$GITHUB_ENV"
+          echo "UNSLOTH_SKIP_AUTOSTART=1" >> "$GITHUB_ENV"
+
+      - name: "Install the PR checkout end to end"
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash install.sh --local --no-torch 2>&1 | tee logs/linux-install.log
+          echo 'PASS Linux local installer completed'
+
+      - name: "Verify the desktop entry selects the Tauri PNG"
+        shell: bash
+        run: |
+          set -euo pipefail
+          DESKTOP="$HOME/.local/share/applications/unsloth-studio.desktop"
+          test -f "$DESKTOP"
+          ICON=$(sed -n 's/^Icon=//p' "$DESKTOP")
+          test -n "$ICON"
+          test -f "$ICON"
+          cmp "$GITHUB_WORKSPACE/studio/src-tauri/icons/icon.png" "$ICON"
+          printf 'desktop=%s\nselected_icon=%s\n' "$DESKTOP" "$ICON" | tee logs/linux-desktop-icon.txt
+          echo 'PASS Linux .desktop selects the Tauri PNG byte-for-byte'
+
+      - name: "Launch the installed Studio and reach health"
+        shell: bash
+        run: |
+          set -euo pipefail
+          PORT=8898
+          "$HOME/.local/bin/unsloth" studio -H 127.0.0.1 -p "$PORT" > logs/linux-studio.log 2>&1 &
+          PID=$!
+          cleanup() { kill -TERM "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; }
+          trap cleanup EXIT
+          for _ in $(seq 1 180); do
+            if curl -fsS "http://127.0.0.1:$PORT/api/health" > logs/linux-health.json 2>/dev/null; then
+              cat logs/linux-health.json
+              echo 'PASS installed Linux Studio reached /api/health'
+              exit 0
+            fi
+            kill -0 "$PID" 2>/dev/null || { tail -100 logs/linux-studio.log; exit 1; }
+            sleep 1
+          done
+          tail -100 logs/linux-studio.log
+          echo 'FAIL installed Linux Studio did not become healthy'
+          exit 1
+
+      - name: "Compare the before and after Linux icon dimensions"
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          
+          def png_size(path: Path):
+              data = path.read_bytes()
+              if data[:8] != b'\x89PNG\r\n\x1a\n' or data[12:16] != b'IHDR':
+                  raise SystemExit(f'FAIL not a PNG: {path}')
+              return struct.unpack('>II', data[16:24])
+          
+          fallback = Path('studio/frontend/public/rounded-512.png')
+          selected = Path('studio/src-tauri/icons/icon.png')
+          before = png_size(fallback)
+          after = png_size(selected)
+          print(f'BEFORE rounded-512.png={before[0]}x{before[1]}')
+          print(f'AFTER  src-tauri icon.png={after[0]}x{after[1]}')
+          if after != (1024, 1024):
+              print('FAIL PR selects a 512x512 PNG, not the specified 1024x1024 higher-resolution icon')
+              raise SystemExit(1)
+          if after[0] <= before[0] or after[1] <= before[1]:
+              print('FAIL selected Linux icon is not higher resolution than the fallback')
+              raise SystemExit(1)
+          print('PASS selected Linux icon is 1024x1024 and higher resolution than the fallback')
+          PY
+
+
+      - name: "Upload Linux icon E2E evidence"
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr7628-linux-icon-live-evidence
+          path: logs
+          if-no-files-found: warn
+          retention-days: 7
+
