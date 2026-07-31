@@ -407,7 +407,9 @@ def main() -> int:
     evidence.mkdir(parents=True, exist_ok=True)
     screenshots = evidence / "screenshots"
     screenshots.mkdir(exist_ok=True)
-    studio_home = Path(os.environ["UNSLOTH_STUDIO_HOME"]).resolve()
+    # The desktop binary deliberately owns only the legacy root and removes
+    # UNSLOTH_STUDIO_HOME from every managed subprocess.
+    studio_home = (Path.home() / ".unsloth" / "studio").resolve()
 
     opener_bin = evidence / "fake-bin"
     opener_bin.mkdir(exist_ok=True)

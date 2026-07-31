@@ -18,7 +18,8 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  UNSLOTH_STUDIO_HOME: ${{ github.workspace }}/.studio-live
+  # The desktop wrapper intentionally ignores UNSLOTH_STUDIO_HOME and owns the
+  # legacy ~/.unsloth/studio root, so install there for a production-faithful probe.
   EVIDENCE_DIR: ${{ github.workspace }}/artifacts/pr-7660-tauri-live
 
 jobs:
