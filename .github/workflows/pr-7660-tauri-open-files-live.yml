@@ -97,7 +97,8 @@ jobs:
           mkdir -p "$EVIDENCE_DIR"
           app="$GITHUB_WORKSPACE/studio/src-tauri/target/debug/unsloth-studio"
           test -x "$app"
-          dbus-run-session -- xvfb-run -a -s '-screen 0 1440x1000x24' \
+          # Start D-Bus inside Xvfb so portal-activated GTK file choosers inherit DISPLAY.
+          xvfb-run -a -s '-screen 0 1440x1000x24' dbus-run-session -- \
             sh -c 'openbox >/tmp/pr7660-openbox.log 2>&1 & exec python3 .github/scripts/pr-7660-tauri-open-files-probe.py --application "$1" --evidence "$2"' \
             sh "$app" "$EVIDENCE_DIR"
 
