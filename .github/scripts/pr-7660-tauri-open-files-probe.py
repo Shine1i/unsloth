@@ -484,7 +484,19 @@ def main() -> int:
         wait_for(lambda: "Settings" in driver.source(), 30, "Settings dialog")
         driver.click_text("Data", starts_with=True)
         wait_for(lambda: "Uploaded files" in driver.source(), 30, "Data settings tab")
-        driver.click_text("Manage")
+        opened_files = driver.execute(
+            """
+            const row = document.querySelector('[data-settings-label="Uploaded files"]');
+            const button = row && [...row.querySelectorAll('button')].find(
+              (node) => (node.textContent || '').trim() === 'Manage'
+            );
+            if (!button || button.getClientRects().length === 0) return false;
+            button.click();
+            return true;
+            """
+        )
+        if (opened_files is not True:
+            raise ProbeError("Uploaded files Manage action was not found")
         wait_for(
             lambda: (
                 "pr7660-rag.txt" in driver.source()
