@@ -1,0 +1,180 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 7568 OpenClaw Qwen3-0.6B Live Repro"
+
+on:
+  push:
+    branches:
+      - "pr-7568-openclaw-qwen06-repro-ci-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24.15.0"
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Install Linux dependencies"
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev libssl-dev jq
+
+      - name: "Download Qwen3-0.6B Q8 GGUF"
+        shell: bash
+        run: |
+          python -m pip install --upgrade huggingface_hub
+          mkdir -p gguf-cache logs
+          bash .github/scripts/hf-download-with-retry.sh unsloth/Qwen3-0.6B-GGUF Qwen3-0.6B-Q8_0.gguf gguf-cache
+          ls -lh gguf-cache/Qwen3-0.6B-Q8_0.gguf
+
+      - name: "Install Unsloth locally"
+        shell: bash
+        run: |
+          set -o pipefail
+          bash install.sh --local --no-torch 2>&1 | tee logs/install.log
+
+      - name: "Serve live Qwen3-0.6B model"
+        shell: bash
+        run: |
+          unsloth studio reset-password
+          bash .github/scripts/serve-unsloth-run.sh --gguf-file "$GITHUB_WORKSPACE/gguf-cache/Qwen3-0.6B-Q8_0.gguf" --port 18976 --log-dir logs --extra "--seed 3407 --temp 0" --health-timeout 900
+
+      - name: "Preflight OpenAI chat and tool calling"
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o logs/preflight.json -w '%{http_code}' "$UNSLOTH_BASE_URL/v1/chat/completions" -H "Authorization: Bearer $UNSLOTH_API_KEY" -H 'content-type: application/json' --max-time 180 -d "{\"model\":\"$UNSLOTH_MODEL_ID\",\"max_tokens\":32,\"messages\":[{\"role\":\"user\",\"content\":\"Reply pong\"}]}")
+          test "$code" = 200
+          echo "LIVE_PREFLIGHT_PASS http=$code model=$UNSLOTH_MODEL_ID"
+
+      - name: "Install pinned OpenClaw"
+        shell: bash
+        run: |
+          npm install -g openclaw@2026.7.1-2
+          openclaw --version | tee logs/openclaw-version.txt
+
+      - name: "Run OpenClaw live workspace probe"
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf live-project
+          mkdir live-project
+          
+          # Generate the saved recipe at the repository root. The PR must defer workspace
+          # resolution until this recipe is executed from a different directory below.
+          unsloth start openclaw --api-key "$UNSLOTH_API_KEY" --no-launch --yolo > logs/openclaw-recipe.txt
+          grep -q '^export OPENCLAW_WORKSPACE_DIR="$PWD"$' logs/openclaw-recipe.txt
+          CONNECT_ENV=$(grep -E '^(export |unset )' logs/openclaw-recipe.txt || true)
+          eval "$CONNECT_ENV"
+          export OPENCLAW_CONFIG_PATH OPENCLAW_STATE_DIR
+          
+          jq -e '.agents.defaults.workspace == "${OPENCLAW_WORKSPACE_DIR}" and .agents.defaults.skipBootstrap == true' "$OPENCLAW_CONFIG_PATH"
+          python3 - "$OPENCLAW_CONFIG_PATH" <<'PY'
+          import json, sys
+          p = sys.argv[1]
+          with open(p, encoding="utf-8") as f:
+              cfg = json.load(f)
+          agents = cfg.setdefault("agents", {})
+          items = [item for item in agents.get("list", []) if item.get("id") != "ci"]
+          items.append({
+              "id": "ci",
+              "contextInjection": "never",
+              "tools": {"allow": ["write"]},
+          })
+          agents["list"] = items
+          with open(p, "w", encoding="utf-8") as f:
+              json.dump(cfg, f, indent=2)
+          PY
+          
+          # Preserve the recipe exports verbatim. OPENCLAW_WORKSPACE_DIR="$PWD" must
+          # resolve to live-project here, not the repository where the recipe was made.
+          {
+            echo 'set -uo pipefail'
+            echo "$CONNECT_ENV"
+            printf '%q ' openclaw agent --local --agent ci --model "unsloth/$UNSLOTH_MODEL_ID" --message
+            printf '%q\n' 'Use the write tool exactly once to create hello.txt in the current workspace with exactly one line containing PASS. Do not create or modify any other file. After the tool succeeds, stop.'
+          } > logs/invoke-openclaw.sh
+          chmod +x logs/invoke-openclaw.sh
+          
+          set +e
+          ( cd live-project && timeout 300 bash "$GITHUB_WORKSPACE/logs/invoke-openclaw.sh" ) > logs/openclaw-live.txt 2>&1
+          agent_rc=$?
+          set -e
+          echo "LIVE_AGENT_RC=$agent_rc" | tee -a logs/openclaw-live.txt
+          
+          # Side effects are the scoped behavior under review. Qwen3-0.6B may hit the
+          # PR-documented, out-of-scope post-tool final-response/replay issue, so record
+          # its process status but gate on the real filesystem behavior.
+          test -f live-project/hello.txt
+          test "$(tr -d '\r\n' < live-project/hello.txt)" = PASS
+          test ! -e hello.txt
+          for polluted in AGENTS.md BOOTSTRAP.md SOUL.md USER.md IDENTITY.md TOOLS.md HEARTBEAT.md .git; do
+            test ! -e "live-project/$polluted"
+          done
+          actual=$(find live-project -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
+          test "$actual" = hello.txt
+          echo "LIVE_WORKSPACE_PASS file=$GITHUB_WORKSPACE/live-project/hello.txt contents=PASS"
+          echo "LIVE_NO_BOOTSTRAP_PASS entries=$actual"
+
+
+      - name: "Collect and redact diagnostics"
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p logs/studio-logs
+          cp -r "$HOME/.unsloth/studio/logs/." logs/studio-logs/ 2>/dev/null || true
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          token = os.environ.get("UNSLOTH_API_KEY", "")
+          if token:
+              for root in (Path("logs"), Path("live-project")):
+                  if not root.exists():
+                      continue
+                  for path in root.rglob("*"):
+                      if not path.is_file():
+                          continue
+                      try:
+                          data = path.read_bytes()
+                      except OSError:
+                          continue
+                      needle = token.encode()
+                      if needle in data:
+                          path.write_bytes(data.replace(needle, b"<REDACTED>"))
+          PY
+
+      - name: "Stop Unsloth"
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${UNSLOTH_SERVER_PID:-}" ] && [ "${UNSLOTH_SERVER_PID}" != 0 ]; then
+            kill "$UNSLOTH_SERVER_PID" 2>/dev/null || true
+          fi
+
+      - name: "Upload live repro evidence"
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr7568-openclaw-qwen06-live-evidence
+          path: |
+            logs/
+            live-project/
+          retention-days: 7
+
