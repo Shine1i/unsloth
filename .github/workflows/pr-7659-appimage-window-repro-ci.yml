@@ -136,7 +136,7 @@ jobs:
           echo "$wid" > evidence/window-id.txt
           xdotool getwindowgeometry --shell "$wid" | tee evidence/setup-geometry.txt
           import -display :99 -window root evidence/01-setup.png
-          read -r x y w h < <(xdotool getwindowgeometry --shell "$wid" | awk -F= '/^(X|Y|WIDTH|HEIGHT)=/{printf "%s ",$2}')
+          read -r x y w h < <(xdotool getwindowgeometry --shell "$wid" | awk -F= '/^(X|Y|WIDTH|HEIGHT)=/{printf "%s ",$2} END { print "" }')
           printf 'SETUP geometry=%sx%s position=%s,%s\n' "$w" "$h" "$x" "$y" | tee evidence/assertions.log
           (( w >= 750 && w <= 770 && h >= 550 && h <= 570 )) || { echo "FAIL expected setup 760x560, got ${w}x${h}" | tee -a evidence/assertions.log; exit 1; }
           xdotool windowactivate --sync "$wid"
