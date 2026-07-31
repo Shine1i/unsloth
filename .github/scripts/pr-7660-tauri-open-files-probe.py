@@ -130,6 +130,49 @@ class WebDriver:
         if clicked is not True:
             raise ProbeError(f"visible button with aria-label {label!r} was not found")
 
+
+    def click_aria_as_user(self, label: str) -> None:
+        center = self.execute(
+            """
+            const el = [...document.querySelectorAll('button')].find(
+              (node) => node.getAttribute('aria-label') === arguments[0] &&
+                node.getClientRects().length > 0
+            );
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {x: Math.round(rect.left + rect.width / 2),
+                    y: Math.round(rect.top + rect.height / 2)};
+            """,
+            label,
+        )
+        if not isinstance(center, dict):
+            raise ProbeError(f"visible button with aria-label {label!r} was not found")
+        self.request(
+            "POST",
+            self.endpoint("/actions"),
+            {
+                "actions": [
+                    {
+                        "type": "pointer",
+                        "id": "mouse",
+                        "parameters": {"pointerType": "mouse"},
+                        "actions": [
+                            {
+                                "type": "pointerMove",
+                                "duration": 100,
+                                "origin": "viewport",
+                                "x": int(center["x"]),
+                                "y": int(center["y"]),
+                            },
+                            {"type": "pointerDown", "button": 0},
+                            {"type": "pointerUp", "button": 0},
+                        ],
+                    }
+                ]
+            },
+            timeout=30,
+        )
+
     def click_text(self, text: str, *, starts_with: bool = False) -> None:
         clicked = self.execute(
             """
@@ -556,7 +599,7 @@ def main() -> int:
         )
 
         baseline_windows = visible_windows()
-        driver.click_aria("Open pr7660-report.pdf")
+        driver.click_aria_as_user("Open pr7660-report.pdf")
 
         def new_dialog() -> str | None:
             active = active_window()
