@@ -81,5 +81,7 @@ jobs:
         with:
           name: "pr7567-${{ matrix.case_label }}-${{ github.run_attempt }}"
           path: .repro/
+
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7

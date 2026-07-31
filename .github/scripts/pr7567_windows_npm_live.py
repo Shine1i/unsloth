@@ -106,7 +106,12 @@ def main() -> int:
     print(shim_text.rstrip())
     print("SHIM_END")
 
-    predicted = start._resolved_launch_command(str(shim), [PROMPT])
+    resolver = getattr(
+        start,
+        "_resolved_launch_command",
+        lambda resolved_executable, arguments: [resolved_executable, *arguments],
+    )
+    predicted = resolver(str(shim), [PROMPT])
     print(f"RESOLVED_EXECUTABLE={predicted[0]}")
     print(f"BYPASS_ACTIVE={Path(predicted[0]).suffix.lower() not in {'.cmd', '.bat'}}")
 
