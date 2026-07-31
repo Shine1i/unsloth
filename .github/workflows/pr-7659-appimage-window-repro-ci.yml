@@ -1,0 +1,165 @@
+name: PR 7659 AppImage window repro CI
+
+on:
+  push:
+    branches:
+      - 'pr-7659-appimage-window-repro-ci-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  appimage-x11-1920x1080:
+    name: AppImage X11 1920x1080 geometry
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Install AppImage build and X11 test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf libfuse2 xvfb openbox xdotool imagemagick
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: studio/src-tauri -> target
+
+      - name: Install pinned frontend and Tauri dependencies
+        run: |
+          npm ci --prefix studio --no-fund --no-audit
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          test "$(npx --prefix studio tauri --version)" = 'tauri-cli 2.10.1'
+
+      - name: Install deterministic fake installer and backend fixture
+        run: |
+          cat > install.sh <<'INSTALL'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          root="$HOME/.unsloth/studio"
+          bindir="$root/unsloth_studio/bin"
+          mkdir -p "$bindir" "$root/share"
+          cat > "$bindir/unsloth" <<'CLI'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          root="$HOME/.unsloth/studio"
+          if [[ "${1:-}" == "-h" ]]; then echo 'fake unsloth fixture'; exit 0; fi
+          if [[ "${1:-}" == studio && "${2:-}" == desktop-capabilities ]]; then
+            printf '%s\n' '{"desktop_protocol_version":1,"desktop_manageability_version":2,"supports_api_only":true,"supports_provision_desktop_auth":true,"supports_desktop_backend_ownership":true,"studio_install_ok":true,"version":"2026.5.3"}'
+            exit 0
+          fi
+          if [[ "${1:-}" == studio && "${2:-}" == provision-desktop-auth ]]; then
+            mkdir -p "$root/share"; printf 'fixture-secret' > "$root/share/.desktop_secret"; chmod 600 "$root/share/.desktop_secret"; exit 0
+          fi
+          if [[ "${1:-}" == studio ]]; then
+            port=8888
+            while (($#)); do [[ "$1" == -p ]] && { port="$2"; break; }; shift; done
+            exec python3 -u - "$port" <<'PY'
+          import json, sys
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+          port = int(sys.argv[1])
+          class Handler(BaseHTTPRequestHandler):
+              def log_message(self, fmt, *args): pass
+              def reply(self, status, payload):
+                  body = json.dumps(payload).encode()
+                  self.send_response(status); self.send_header('Content-Type', 'application/json')
+                  self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+              def do_GET(self):
+                  if self.path in ('/api/liveness', '/api/health'):
+                      self.reply(200, {'status':'healthy','service':'Unsloth UI Backend','version':'2026.5.3'})
+                  else: self.reply(200, {})
+              def do_POST(self):
+                  n = int(self.headers.get('Content-Length', '0')); raw = self.rfile.read(n)
+                  try: data = json.loads(raw or b'{}')
+                  except Exception: data = {}
+                  if self.path == '/api/auth/desktop-login' and data.get('secret') == 'fixture-secret':
+                      self.reply(200, {'access_token':'fixture-access','refresh_token':'fixture-refresh'})
+                  elif self.path == '/api/auth/desktop-login': self.reply(401, {'detail':'invalid'})
+                  else: self.reply(200, {})
+          server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+          print(f'TAURI_PORT={port}', flush=True)
+          server.serve_forever()
+          PY
+          fi
+          exit 1
+          CLI
+          chmod +x "$bindir/unsloth"
+          echo '[TAURI:STEP] Deterministic CI fixture installed'
+          INSTALL
+          chmod +x install.sh
+          sha256sum install.sh | tee fixture-install-sha256.txt
+
+      - name: Pin linuxdeploy and build the real AppImage
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/tauri-tools-cache
+          TAURI_SIGNING_PRIVATE_KEY: ''
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: |
+          set -euo pipefail
+          mkdir -p "$XDG_CACHE_HOME/tauri"
+          curl -fsSL https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20250213-2/linuxdeploy-x86_64.AppImage -o "$XDG_CACHE_HOME/tauri/linuxdeploy-x86_64.AppImage"
+          echo '4648f278ab3ef31f819e67c30d50f462640e5365a77637d7e6f2ad9fd0b4522a  '"$XDG_CACHE_HOME/tauri/linuxdeploy-x86_64.AppImage" | sha256sum -c -
+          chmod +x "$XDG_CACHE_HOME/tauri/linuxdeploy-x86_64.AppImage"
+          npx --prefix studio tauri build --bundles appimage
+          APPIMAGE="$(find studio/src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -type f | head -1)"
+          test -n "$APPIMAGE"
+          cp "$APPIMAGE" ./Unsloth-Studio-PR-7659.AppImage
+          chmod +x ./Unsloth-Studio-PR-7659.AppImage
+          sha256sum ./Unsloth-Studio-PR-7659.AppImage | tee appimage-sha256.txt
+
+      - name: Exercise setup to app transition and sample geometry
+        id: geometry
+        run: |
+          set -euo pipefail
+          mkdir -p evidence home
+          export HOME="$PWD/home" DISPLAY=:99 XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg-runtime"
+          mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp > evidence/xvfb.log 2>&1 & echo $! > evidence/xvfb.pid
+          sleep 1
+          openbox > evidence/openbox.log 2>&1 & echo $! > evidence/openbox.pid
+          ./Unsloth-Studio-PR-7659.AppImage > evidence/app-stdout.log 2>&1 & echo $! > evidence/app.pid
+          wid=''
+          for i in $(seq 1 200); do wid="$(xdotool search --onlyvisible --name 'Unsloth Studio' 2>/dev/null | head -1 || true)"; [[ -n "$wid" ]] && break; sleep .1; done
+          [[ -n "$wid" ]] || { echo 'FAIL setup window not found'; exit 1; }
+          echo "$wid" > evidence/window-id.txt
+          xdotool getwindowgeometry --shell "$wid" | tee evidence/setup-geometry.txt
+          import -display :99 -window root evidence/01-setup.png
+          read -r x y w h < <(xdotool getwindowgeometry --shell "$wid" | awk -F= '/^(X|Y|WIDTH|HEIGHT)=/{printf "%s ",$2}')
+          printf 'SETUP geometry=%sx%s position=%s,%s\n' "$w" "$h" "$x" "$y" | tee evidence/assertions.log
+          (( w >= 750 && w <= 770 && h >= 550 && h <= 570 )) || { echo "FAIL expected setup 760x560, got ${w}x${h}" | tee -a evidence/assertions.log; exit 1; }
+          xdotool windowactivate --sync "$wid"
+          xdotool mousemove --window "$wid" $((w/2)) $((h-55)) click 1
+          : > evidence/geometry-sequence.tsv
+          for i in $(seq 0 100); do
+            ms=$((i*40))
+            read -r cw ch < <(xdotool getwindowgeometry --shell "$wid" 2>/dev/null | awk -F= '/^WIDTH=/{w=$2}/^HEIGHT=/{h=$2}END{print w,h}')
+            printf '%04d\t%s\t%s\n' "$ms" "$cw" "$ch" >> evidence/geometry-sequence.tsv
+            sleep .04
+          done
+          import -display :99 -window root evidence/02-app.png
+          cp "$HOME/.unsloth/studio/tauri.log" evidence/tauri.log 2>/dev/null || true
+          tail -20 evidence/geometry-sequence.tsv | tee -a evidence/assertions.log
+          read -r fw fh < <(tail -1 evidence/geometry-sequence.tsv | awk '{print $2,$3}')
+          echo "FINAL geometry=${fw}x${fh}" | tee -a evidence/assertions.log
+          grep -q $'\t1440\t890$' evidence/geometry-sequence.tsv || { echo 'FAIL target 1440x890 was never observed' | tee -a evidence/assertions.log; exit 1; }
+          [[ "$fw" == 1440 && "$fh" == 890 ]] || { echo "FAIL final expected 1440x890, got ${fw}x${fh}" | tee -a evidence/assertions.log; exit 1; }
+          echo 'PASS setup 760x560 transitioned and settled at first app layout 1440x890' | tee -a evidence/assertions.log
+
+      - name: Upload AppImage geometry evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr-7659-appimage-window-geometry-${{ github.ref_name }}
+          path: |
+            evidence/
+            fixture-install-sha256.txt
+            appimage-sha256.txt
+          retention-days: 7
+          if-no-files-found: warn
