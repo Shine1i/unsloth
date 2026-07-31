@@ -80,6 +80,8 @@ jobs:
           OWNER="$HOME/.unsloth/studio/run/desktop_backend.json"
           BIN="$GITHUB_WORKSPACE/studio/src-tauri/target/debug/unsloth-studio"
           XVFB_PID=''
+
+          DBUS_PID=''
           APP_WRAPPER_PID=''
           APP_PID=''
           BACKEND_PID=''
@@ -98,6 +100,8 @@ jobs:
             [ -n "$APP_WRAPPER_PID" ] && kill -KILL "$APP_WRAPPER_PID" 2>/dev/null
             [ -n "$BACKEND_PGID" ] && kill -KILL -- "-$BACKEND_PGID" 2>/dev/null
             [ -n "$UNRELATED_PID" ] && kill -TERM "$UNRELATED_PID" 2>/dev/null
+            [ -n "$DBUS_PID" ] && kill -TERM "$DBUS_PID" 2>/dev/null
+
             [ -n "$XVFB_PID" ] && kill -TERM "$XVFB_PID" 2>/dev/null
           }
           trap cleanup EXIT
@@ -110,6 +114,15 @@ jobs:
             sleep 0.1
           done
           xdpyinfo -display :99 >/dev/null
+
+
+          # Keep one explicit D-Bus session alive for the whole test. Launching
+          # the binary directly makes $! the actual Tauri PID instead of a
+          # dbus-run-session implementation detail.
+          eval "$(dbus-launch --sh-syntax)"
+          DBUS_PID="${DBUS_SESSION_BUS_PID:-}"
+          test -n "$DBUS_PID"
+          kill -0 "$DBUS_PID"
 
           # Prove that the watchdog never harms an unrelated process.
           unrelated_port=$(python3 - <<'PY'
@@ -136,7 +149,7 @@ jobs:
             BACKEND_PID=''
             BACKEND_PGID=''
 
-            dbus-run-session -- "$BIN" >"$case_log" 2>&1 &
+            "$BIN" >"$case_log" 2>&1 &
             APP_WRAPPER_PID=$!
 
             local deadline=$((SECONDS + 180))
@@ -152,15 +165,28 @@ jobs:
                   break
                 fi
               fi
-              # dbus-run-session may not remain as the long-lived wrapper on
-              # every runner image. The ownership file's app_pid is the actual
-              # Tauri process and is the authoritative liveness check above.
+              if ! kill -0 "$APP_WRAPPER_PID" 2>/dev/null; then
+                echo "FAIL $label: actual Tauri pid $APP_WRAPPER_PID exited before its backend became healthy"
+                ps -ef --forest
+                cat "$case_log"
+                return 1
+              fi
               sleep 0.5
             done
 
             if [ -z "$APP_PID" ] || [ -z "$BACKEND_PID" ] || [ -z "$port" ]; then
               echo "FAIL $label: timed out waiting for desktop ownership metadata"
+              ps -eo pid,ppid,pgid,sid,stat,cmd >"logs/processes-${label}-timeout.txt"
+              if [ -f "$OWNER" ]; then
+                jq '{schema_version,kind,app_pid,backend_pid,generation,requested_port,port,studio_root_id,started_at_ms,updated_at_ms}' \
+                  "$OWNER" >"logs/owner-${label}-timeout-sanitized.json" || true
+              fi
               cat "$case_log"
+              return 1
+            fi
+            if [ "$APP_PID" != "$APP_WRAPPER_PID" ]; then
+              echo "FAIL $label: ownership app pid $APP_PID does not match launched Tauri pid $APP_WRAPPER_PID"
+              ps -ef --forest
               return 1
             fi
 
