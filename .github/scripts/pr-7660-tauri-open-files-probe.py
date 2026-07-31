@@ -495,7 +495,7 @@ def main() -> int:
             return true;
             """
         )
-        if (opened_files is not True:
+        if opened_files is not True:
             raise ProbeError("Uploaded files Manage action was not found")
         wait_for(
             lambda: (
