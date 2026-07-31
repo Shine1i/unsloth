@@ -425,6 +425,21 @@ def main() -> int:
     environment = os.environ.copy()
     environment["PATH"] = f"{opener_bin}{os.pathsep}{environment['PATH']}"
     environment["PR7660_OPEN_LOG"] = str(opener_log)
+
+
+    # Start the same managed CLI explicitly so the probe is not coupled to the
+    # desktop wrapper's asynchronous child-start timing. Tauri detects and
+    # attaches to this same-root backend through its production preflight path.
+    backend_cli = studio_home / "unsloth_studio" / "bin" / "unsloth"
+    backend_log_handle = (evidence / "managed-backend.log").open("w", encoding="utf-8")
+    backend_process = subprocess.Popen(
+        [str(backend_cli), "studio", "--api-only", "-H", "127.0.0.1", "-p", "8888"],
+        env=environment,
+        stdout=backend_log_handle,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
     with driver_log.open("w", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
             ["tauri-driver", "--port", str(args.driver_port)],
@@ -443,9 +458,9 @@ def main() -> int:
         "status": "failed",
     }
     try:
+        health = wait_for(health_port, 300, "managed Studio backend health", interval=2)
         driver.wait_ready()
         driver.start_session(application)
-        health = wait_for(health_port, 300, "owned Studio backend health", interval=2)
         port, health_payload = health
         base_url = f"http://127.0.0.1:{port}"
         (evidence / "backend-health.json").write_text(
@@ -625,6 +640,17 @@ def main() -> int:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+        if backend_process.poll() is None:
+            try:
+                os.killpg(backend_process.pid, signal.SIGTERM)
+                backend_process.wait(timeout=15)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(backend_process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        backend_log_handle.close()
 
 
 if __name__ == "__main__":
