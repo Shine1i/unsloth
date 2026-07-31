@@ -16,7 +16,7 @@ from unsloth_cli.commands import start
 PACKAGE_NAME = "pr7567-capture-agent"
 PROMPT = (
     "Step 1: add 2 + 2.\r\n"
-    "Step 2: explain \"division by zero\".\r\n"
+    'Step 2: explain "division by zero".\r\n'
     "Step 3: emit sentinel PR7567_END."
 )
 
@@ -40,7 +40,7 @@ def main() -> int:
 
     target_name = "capture" if args.target_style == "extensionless" else "capture.js"
     shebang = (
-        "#!/usr/bin/env node --no-warnings"
+        "#!/usr/bin/env PR7567_SHIM_ENV=preserved node --no-warnings"
         if args.target_style == "shebang-args"
         else "#!/usr/bin/env node"
     )
@@ -50,7 +50,8 @@ def main() -> int:
         + "\n"
         + "const fs = require('fs');\n"
         + "fs.writeFileSync(process.env.CAPTURE_PATH, "
-        + "JSON.stringify(process.argv.slice(2)), 'utf8');\n",
+        + "JSON.stringify({argv: process.argv.slice(2), "
+        + "shimEnv: process.env.PR7567_SHIM_ENV || null}), 'utf8');\n",
         encoding = "utf-8",
     )
     (package_dir / "package.json").write_text(
@@ -122,9 +123,12 @@ def main() -> int:
         {},
         install_hint = "unused",
     )
-    actual = None
+    captured = None
     if capture_path.exists():
-        actual = json.loads(capture_path.read_text(encoding = "utf-8"))
+        captured = json.loads(capture_path.read_text(encoding = "utf-8"))
+    actual = captured["argv"] if captured is not None else None
+    actual_environment = captured["shimEnv"] if captured is not None else None
+    expected_environment = "preserved" if args.target_style == "shebang-args" else None
 
     result = {
         "case": args.case_label,
@@ -135,6 +139,8 @@ def main() -> int:
         "returncode": returncode,
         "expected_argv": [PROMPT],
         "actual_argv": actual,
+        "expected_shim_environment": expected_environment,
+        "actual_shim_environment": actual_environment,
     }
     (repro_root / "result.json").write_text(
         json.dumps(result, indent = 2) + "\n",
@@ -149,6 +155,11 @@ def main() -> int:
         failures.append(f"launch exited {returncode}")
     if actual != [PROMPT]:
         failures.append(f"captured argv was {actual!r}")
+
+    if actual_environment != expected_environment:
+        failures.append(
+            f"captured shim environment was {actual_environment!r}, expected {expected_environment!r}"
+        )
     if failures:
         print(f"FAIL case={args.case_label}: " + "; ".join(failures))
         return 1
