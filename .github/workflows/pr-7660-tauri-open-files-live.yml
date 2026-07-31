@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved.
+
+name: PR 7660 live Tauri uploaded-files E2E
+
+on:
+  push:
+    branches:
+      - 'pr-7660-tauri-open-files-repro-ci*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-7660-live-tauri-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # The desktop wrapper intentionally ignores UNSLOTH_STUDIO_HOME and owns the
+  # legacy ~/.unsloth/studio root, so install there for a production-faithful probe.
+  EVIDENCE_DIR: ${{ github.workspace }}/artifacts/pr-7660-tauri-live
+
+jobs:
+  linux-webkit-live:
+    name: Linux WebKit real Tauri Settings Data flow
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Linux Tauri, WebDriver, and desktop dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake curl dbus-x11 git jq libappindicator3-dev \
+            libcurl4-openssl-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+            openbox patchelf procps python3-pip librsvg2-dev scrot \
+            webkit2gtk-driver xdg-utils xdotool xvfb
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: studio/src-tauri -> target
+
+      - name: Install Studio from this branch
+        shell: bash
+        env:
+          UNSLOTH_SKIP_UPDATE_CHECK: '1'
+        run: bash ./install.sh --local --no-torch
+
+      - name: Install exact frontend and Tauri build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix studio --no-fund --no-audit
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          version="$(npx --prefix studio tauri --version)"
+          echo "$version"
+          test "$version" = 'tauri-cli 2.10.1'
+
+      - name: Build real Tauri debug binary
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ''
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: npx --prefix studio tauri build --debug --no-bundle
+
+      - name: Install tauri-driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install tauri-driver --locked
+          tauri-driver --help >/dev/null
+          command -v WebKitWebDriver
+
+      - name: Exercise Settings Data through the live desktop webview
+        shell: bash
+        env:
+          GDK_BACKEND: x11
+          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+          UNSLOTH_SKIP_UPDATE_CHECK: '1'
+          RUST_BACKTRACE: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          app="$GITHUB_WORKSPACE/studio/src-tauri/target/debug/unsloth-studio"
+          test -x "$app"
+          # Start D-Bus inside Xvfb so portal-activated GTK file choosers inherit DISPLAY.
+          xvfb-run -a -s '-screen 0 1440x1000x24' dbus-run-session -- \
+            sh -c 'openbox >/tmp/pr7660-openbox.log 2>&1 & exec python3 .github/scripts/pr-7660-tauri-open-files-probe.py --application "$1" --evidence "$2"' \
+            sh "$app" "$EVIDENCE_DIR"
+
+      - name: Upload live Tauri evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-7660-live-tauri-${{ github.run_attempt }}
+          path: |
+            artifacts/pr-7660-tauri-live
+            /tmp/pr7660-openbox.log
+          if-no-files-found: warn
+          retention-days: 14
