@@ -1,0 +1,275 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Disposable live A/B proof for unslothai/unsloth#7655. Delete with the staging branches.
+name: PR 7655 Desktop Crash Live E2E
+
+on:
+  push:
+    branches:
+      - 'pr-7655-parent-watchdog-repro-ci-*'
+      - 'pr-7655-parent-watchdog-negative-ci-*'
+  workflow_dispatch:
+
+concurrency:
+  group: pr-7655-desktop-crash-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu-live-crash:
+    name: Ubuntu live Tauri + SIGKILL crash recovery
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install native desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            dbus-x11 jq libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev patchelf procps x11-utils xvfb
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-03-27
+
+      - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
+        with:
+          workspaces: studio/src-tauri -> target
+
+      - name: Audit and build frontend
+        run: |
+          python3 scripts/lockfile_supply_chain_audit.py
+          npm ci --prefix studio --no-fund --no-audit
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          npm --prefix studio/frontend run build
+          test -f studio/frontend/dist/index.html
+
+      - name: Install real Studio backend from this checkout
+        env:
+          UNSLOTH_SKIP_AUTOSTART: '1'
+          UNSLOTH_STUDIO_DISABLE_PUBLIC_CHECK: '1'
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          bash install.sh --local --no-torch 2>&1 | tee logs/install.log
+          test -x "$HOME/.unsloth/studio/unsloth_studio/bin/unsloth"
+
+      - name: Build actual Tauri desktop binary
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ''
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: |
+          npx --prefix studio tauri build --debug --no-bundle
+          test -x studio/src-tauri/target/debug/unsloth-studio
+
+      - name: Live E2E — backend exits after uncatchable desktop crash
+        env:
+          UNSLOTH_STUDIO_DISABLE_PUBLIC_CHECK: '1'
+          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          OWNER="$HOME/.unsloth/studio/run/desktop_backend.json"
+          BIN="$GITHUB_WORKSPACE/studio/src-tauri/target/debug/unsloth-studio"
+          XVFB_PID=''
+          APP_WRAPPER_PID=''
+          APP_PID=''
+          BACKEND_PID=''
+          BACKEND_PGID=''
+          UNRELATED_PID=''
+
+          process_group_has_live_member() {
+            local pgid="$1"
+            ps -eo pgid=,stat= | awk -v wanted="$pgid" \
+              '$1 == wanted && $2 !~ /^Z/ { found = 1 } END { exit(found ? 0 : 1) }'
+          }
+
+          cleanup() {
+            set +e
+            [ -n "$APP_PID" ] && kill -KILL "$APP_PID" 2>/dev/null
+            [ -n "$APP_WRAPPER_PID" ] && kill -KILL "$APP_WRAPPER_PID" 2>/dev/null
+            [ -n "$BACKEND_PGID" ] && kill -KILL -- "-$BACKEND_PGID" 2>/dev/null
+            [ -n "$UNRELATED_PID" ] && kill -TERM "$UNRELATED_PID" 2>/dev/null
+            [ -n "$XVFB_PID" ] && kill -TERM "$XVFB_PID" 2>/dev/null
+          }
+          trap cleanup EXIT
+
+          Xvfb :99 -screen 0 1280x800x24 >logs/xvfb.log 2>&1 &
+          XVFB_PID=$!
+          export DISPLAY=:99
+          for _ in $(seq 1 50); do
+            xdpyinfo -display :99 >/dev/null 2>&1 && break
+            sleep 0.1
+          done
+          xdpyinfo -display :99 >/dev/null
+
+          # Prove that the watchdog never harms an unrelated process.
+          unrelated_port=$(python3 - <<'PY'
+          import socket
+          s = socket.socket()
+          s.bind(('127.0.0.1', 0))
+          print(s.getsockname()[1])
+          s.close()
+          PY
+          )
+          python3 -m http.server "$unrelated_port" --bind 127.0.0.1 >logs/unrelated.log 2>&1 &
+          UNRELATED_PID=$!
+          for _ in $(seq 1 50); do
+            curl -fsS "http://127.0.0.1:$unrelated_port/" >/dev/null 2>&1 && break
+            sleep 0.1
+          done
+          curl -fsS "http://127.0.0.1:$unrelated_port/" >/dev/null
+
+          launch_tauri() {
+            local label="$1"
+            local case_log="logs/tauri-${label}.log"
+            rm -f "$OWNER"
+            APP_PID=''
+            BACKEND_PID=''
+            BACKEND_PGID=''
+
+            dbus-run-session -- "$BIN" >"$case_log" 2>&1 &
+            APP_WRAPPER_PID=$!
+
+            local deadline=$((SECONDS + 180))
+            local port=''
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              if [ -f "$OWNER" ]; then
+                APP_PID=$(jq -r '.app_pid // empty' "$OWNER" 2>/dev/null || true)
+                BACKEND_PID=$(jq -r '.backend_pid // empty' "$OWNER" 2>/dev/null || true)
+                port=$(jq -r '.port // empty' "$OWNER" 2>/dev/null || true)
+                if [ -n "$APP_PID" ] && [ -n "$BACKEND_PID" ] && [ -n "$port" ] \
+                  && kill -0 "$APP_PID" 2>/dev/null && kill -0 "$BACKEND_PID" 2>/dev/null \
+                  && curl -fsS "http://127.0.0.1:$port/api/liveness" >/dev/null 2>&1; then
+                  break
+                fi
+              fi
+              if ! kill -0 "$APP_WRAPPER_PID" 2>/dev/null; then
+                echo "FAIL $label: actual Tauri desktop exited before its backend became healthy"
+                cat "$case_log"
+                return 1
+              fi
+              sleep 0.5
+            done
+
+            if [ -z "$APP_PID" ] || [ -z "$BACKEND_PID" ] || [ -z "$port" ]; then
+              echo "FAIL $label: timed out waiting for desktop ownership metadata"
+              cat "$case_log"
+              return 1
+            fi
+
+            local backend_ppid
+            backend_ppid=$(ps -o ppid= -p "$BACKEND_PID" | tr -d ' ')
+            BACKEND_PGID=$(ps -o pgid= -p "$BACKEND_PID" | tr -d ' ')
+            if [ "$backend_ppid" != "$APP_PID" ]; then
+              echo "FAIL $label: backend parent $backend_ppid is not actual Tauri pid $APP_PID"
+              ps -ef --forest
+              return 1
+            fi
+            if [ "$BACKEND_PGID" != "$BACKEND_PID" ]; then
+              echo "FAIL $label: backend $BACKEND_PID is not its process-group leader (pgid=$BACKEND_PGID)"
+              return 1
+            fi
+
+            curl -fsS "http://127.0.0.1:$port/api/liveness" \
+              | tee "logs/liveness-${label}.json" \
+              | jq -e '.service == "Unsloth UI Backend" and .desktop_owner.kind == "tauri" and .supports_desktop_backend_ownership == true' \
+              >/dev/null
+            jq '{schema_version,kind,app_pid,backend_pid,generation,requested_port,port,studio_root_id,started_at_ms,updated_at_ms}' \
+              "$OWNER" >"logs/owner-${label}-sanitized.json"
+            echo "LIVE $label app_pid=$APP_PID backend_pid=$BACKEND_PID backend_ppid=$backend_ppid pgid=$BACKEND_PGID port=$port"
+            LIVE_PORT="$port"
+          }
+
+          launch_tauri before-crash
+          FIRST_APP_PID="$APP_PID"
+          FIRST_BACKEND_PID="$BACKEND_PID"
+          FIRST_BACKEND_PGID="$BACKEND_PGID"
+          FIRST_PORT="$LIVE_PORT"
+
+          # SIGKILL is deliberately uncatchable: PR #7614's app-side signal
+          # cleanup cannot run. The real Python backend must detect reparenting
+          # and shut itself down through PR #7655's watchdog.
+          echo "CRASH SIGKILL app_pid=$FIRST_APP_PID backend_pid=$FIRST_BACKEND_PID port=$FIRST_PORT"
+          kill -KILL "$FIRST_APP_PID"
+          set +e
+          wait "$APP_WRAPPER_PID"
+          CRASH_STATUS=$?
+          set -e
+          APP_WRAPPER_PID=''
+          APP_PID=''
+
+          deadline=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if ! process_group_has_live_member "$FIRST_BACKEND_PGID" \
+              && ! curl -fsS --max-time 1 "http://127.0.0.1:$FIRST_PORT/api/liveness" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.2
+          done
+          ps -eo pid,ppid,pgid,sid,stat,cmd >logs/processes-after-crash.txt
+
+          if process_group_has_live_member "$FIRST_BACKEND_PGID"; then
+            echo "FAIL SIGKILL: real backend process group $FIRST_BACKEND_PGID survived Tauri crash"
+            ps -ef --forest
+            exit 1
+          fi
+          if curl -fsS --max-time 1 "http://127.0.0.1:$FIRST_PORT/api/liveness" >/dev/null 2>&1; then
+            echo "FAIL SIGKILL: backend port $FIRST_PORT is still serving after Tauri crash"
+            exit 1
+          fi
+          curl -fsS "http://127.0.0.1:$unrelated_port/" >/dev/null
+          echo "PASS SIGKILL: Tauri status=$CRASH_STATUS, backend exited, process group empty, port free, unrelated listener alive"
+          BACKEND_PID=''
+          BACKEND_PGID=''
+
+          # A fresh actual Tauri launch must recover immediately rather than see
+          # the crashed app's still-running backend on the old port.
+          launch_tauri after-crash
+          if [ "$BACKEND_PID" = "$FIRST_BACKEND_PID" ]; then
+            echo "FAIL relaunch: backend pid was not replaced"
+            exit 1
+          fi
+          curl -fsS "http://127.0.0.1:$unrelated_port/" >/dev/null
+          echo "PASS relaunch: actual Tauri started a new healthy backend pid=$BACKEND_PID port=$LIVE_PORT"
+
+          # End the recovery launch cleanly so its owner metadata is removed.
+          kill -TERM "$APP_PID"
+          set +e
+          wait "$APP_WRAPPER_PID"
+          CLEAN_STATUS=$?
+          set -e
+          APP_WRAPPER_PID=''
+          APP_PID=''
+          deadline=$((SECONDS + 30))
+          while [ "$SECONDS" -lt "$deadline" ] && process_group_has_live_member "$BACKEND_PGID"; do
+            sleep 0.2
+          done
+          if process_group_has_live_member "$BACKEND_PGID"; then
+            echo "FAIL cleanup: recovery backend survived clean Tauri termination"
+            exit 1
+          fi
+          if [ -e "$OWNER" ]; then
+            echo "FAIL cleanup: owner metadata survived clean Tauri termination"
+            exit 1
+          fi
+          BACKEND_PID=''
+          BACKEND_PGID=''
+          echo "PASS live Tauri crash E2E: uncatchable crash self-reaped backend and relaunch recovered (cleanup status=$CLEAN_STATUS)"
+
+      - name: Upload live crash evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: pr-7655-desktop-crash-live-evidence
+          path: logs/
+          retention-days: 14
+          if-no-files-found: warn
