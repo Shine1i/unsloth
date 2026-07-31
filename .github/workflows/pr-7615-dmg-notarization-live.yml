@@ -1,0 +1,187 @@
+name: PR 7615 DMG Notarization Live Repro
+
+on:
+  push:
+    branches:
+      - pr-7615-dmg-notarize-repro-ci-*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notarize-dmg-live:
+    if: github.repository == 'wasimysaid/unsloth'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout staged PR
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.12'
+
+      - name: Install workflow parser
+        run: python3 -m pip install pyyaml==6.0.2
+
+      - name: Run exact PR credential precheck
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import pathlib
+          import yaml
+
+          workflow = yaml.safe_load(pathlib.Path('.github/workflows/release-desktop.yml').read_text())
+          step = next(
+              item
+              for item in workflow['jobs']['build']['steps']
+              if item.get('name') == 'Check Apple notarization credentials'
+          )
+          pathlib.Path('/tmp/pr7615-credential-check.sh').write_text(step['run'])
+          PY
+          bash /tmp/pr7615-credential-check.sh
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24
+
+      - name: Install pinned Tauri CLI
+        run: npm install --save-dev --prefix studio @tauri-apps/cli@2.10.1 --no-fund --no-audit
+
+      - name: Install frontend dependencies
+        working-directory: studio/frontend
+        run: npm install --no-fund --no-audit
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Import Apple certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 7200 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+          rm -f certificate.p12
+
+      - name: Build signed and app-notarized macOS artifacts
+        id: build_macos
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: studio
+          tauriScript: npx --prefix . tauri
+          args: -v --target aarch64-apple-darwin
+
+      - name: Prove pre-PR DMG is signed but unstapled
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.build_macos.outputs.artifactPaths }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          import os
+
+          matches = [
+              path
+              for path in json.loads(os.environ['ARTIFACT_PATHS'])
+              if isinstance(path, str) and path.lower().endswith('.dmg')
+          ]
+          if len(matches) != 1:
+              raise SystemExit(f'Expected one DMG, found {len(matches)}')
+          with open(os.environ['GITHUB_ENV'], 'a') as env_file:
+              print(f'DMG_PATH={matches[0]}', file=env_file)
+          PY
+          dmg_path="$(python3 -c 'import json, os; print(next(path for path in json.loads(os.environ["ARTIFACT_PATHS"]) if path.lower().endswith(".dmg")))')"
+          codesign --verify --verbose=2 "$dmg_path"
+          if xcrun stapler validate -v "$dmg_path" > "$RUNNER_TEMP/pre-staple.txt" 2>&1; then
+            cat "$RUNNER_TEMP/pre-staple.txt"
+            echo 'Expected the Tauri-produced DMG to lack a stapled ticket before the PR step.' >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/pre-staple.txt"
+          echo 'PASS before-state: DMG signature verifies and stapler rejects the missing ticket.'
+
+      - name: Run exact PR DMG notarization step
+        timeout-minutes: 45
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.build_macos.outputs.artifactPaths }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import pathlib
+          import yaml
+
+          workflow = yaml.safe_load(pathlib.Path('.github/workflows/release-desktop.yml').read_text())
+          step = next(
+              item
+              for item in workflow['jobs']['build']['steps']
+              if item.get('name') == 'Notarize final macOS disk image'
+          )
+          pathlib.Path('/tmp/pr7615-notarize-dmg.sh').write_text(step['run'])
+          PY
+          bash /tmp/pr7615-notarize-dmg.sh
+
+      - name: Verify final stapled DMG and record evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo 'PASS after-state: running independent final checks.'
+            echo "DMG: $DMG_PATH"
+            codesign --verify --verbose=4 "$DMG_PATH"
+            xcrun stapler validate -v "$DMG_PATH"
+            spctl --assess \
+              --type open \
+              --context context:primary-signature \
+              --ignore-cache \
+              --verbose=4 \
+              "$DMG_PATH"
+            shasum -a 256 "$DMG_PATH"
+          } 2>&1 | tee "$RUNNER_TEMP/pr7615-notarization-evidence.txt"
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr7615-dmg-notarization-evidence
+          path: |
+            ${{ runner.temp }}/pre-staple.txt
+            ${{ runner.temp }}/pr7615-notarization-evidence.txt
+          if-no-files-found: warn
+          retention-days: 7
