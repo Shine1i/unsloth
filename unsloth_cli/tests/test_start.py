@@ -1549,6 +1549,7 @@ def test_connect_claude_windows_shim_from_wsl_bridges_env(fake_studio, monkeypat
     assert captured["env"]["ANTHROPIC_BASE_URL"] == BASE
     assert captured["env"]["ANTHROPIC_MODEL"] == MODEL["id"]
     assert captured["env"]["PWD"] == str(tmp_path)
+
     assert "PWD/p" in captured["env"]["WSLENV"].split(":")
     for name in (
         "ANTHROPIC_AUTH_TOKEN",
@@ -1558,6 +1559,131 @@ def test_connect_claude_windows_shim_from_wsl_bridges_env(fake_studio, monkeypat
         "CLAUDE_CODE_OAUTH_TOKEN",
     ):
         assert name in captured["env"]["WSLENV"].split(":")
+
+
+def _npm_node_cmd_shim(target: str) -> str:
+    return (
+        "@ECHO off\r\n"
+        "GOTO start\r\n"
+        ":find_dp0\r\n"
+        "SET dp0=%~dp0\r\n"
+        "EXIT /b\r\n"
+        ":start\r\n"
+        "SETLOCAL\r\n"
+        "CALL :find_dp0\r\n"
+        "\r\n"
+        'IF EXIST "%dp0%\\node.exe" (\r\n'
+        '  SET "_prog=%dp0%\\node.exe"\r\n'
+        ") ELSE (\r\n"
+        '  SET "_prog=node"\r\n'
+        "  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n"
+        ")\r\n"
+        "\r\n"
+        f'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+        f'"%dp0%\\{target}" %*\r\n'
+    )
+
+
+def test_launch_windows_npm_shim_preserves_multiline_argument(monkeypatch, tmp_path):
+    _simulate_windows(monkeypatch)
+    cmd = tmp_path / "fake-agent.cmd"
+    target = tmp_path / "node_modules" / "fake-agent" / "index.js"
+    target.parent.mkdir(parents = True)
+    target.write_text("", encoding = "utf-8")
+    cmd.write_bytes(_npm_node_cmd_shim(r"node_modules\fake-agent\index.js").encode())
+    captured = {}
+
+    def which(name):
+        return str(cmd) if name == "fake-agent" else r"C:\Program Files\nodejs\node.exe"
+
+    def run(command, env):
+        captured["command"] = command
+        return SimpleNamespace(returncode = 0)
+
+    monkeypatch.setattr(start.shutil, "which", which)
+    monkeypatch.setattr(start.subprocess, "run", run)
+
+    code = start._launch(
+        ["fake-agent", 'first line\nsecond "quoted" line'],
+        {},
+        install_hint = "unused",
+    )
+
+    assert code == 0
+    assert captured["command"] == [
+        r"C:\Program Files\nodejs\node.exe",
+        str(target),
+        'first line\nsecond "quoted" line',
+    ]
+
+
+def test_resolved_launch_command_uses_native_npm_entrypoint(monkeypatch, tmp_path):
+    _simulate_windows(monkeypatch)
+    cmd = tmp_path / "fake-agent.cmd"
+    target = tmp_path / "node_modules" / "fake-agent" / "agent.exe"
+    target.parent.mkdir(parents = True)
+    target.write_bytes(b"")
+    cmd.write_bytes(
+        (
+            "@ECHO off\r\n"
+            "GOTO start\r\n"
+            ":find_dp0\r\n"
+            "SET dp0=%~dp0\r\n"
+            "EXIT /b\r\n"
+            ":start\r\n"
+            "SETLOCAL\r\n"
+            "CALL :find_dp0\r\n"
+            '"%dp0%\\node_modules\\fake-agent\\agent.exe" %*\r\n'
+        ).encode()
+    )
+
+    assert start._resolved_launch_command(str(cmd), ["--flag", "two words"]) == [
+        str(target),
+        "--flag",
+        "two words",
+    ]
+
+
+def test_resolved_launch_command_handles_project_local_npm_shim(monkeypatch, tmp_path):
+    _simulate_windows(monkeypatch)
+    node_modules = tmp_path / "project" / "node_modules"
+    cmd = node_modules / ".bin" / "fake-agent.cmd"
+    target = node_modules / "fake-agent" / "index.js"
+    cmd.parent.mkdir(parents = True)
+    target.parent.mkdir(parents = True)
+    target.write_text("", encoding = "utf-8")
+    cmd.write_bytes(_npm_node_cmd_shim(r"..\fake-agent\index.js").encode())
+    monkeypatch.setattr(start.shutil, "which", lambda name: r"C:\Program Files\nodejs\node.exe")
+
+    assert start._resolved_launch_command(str(cmd), ["--flag"]) == [
+        r"C:\Program Files\nodejs\node.exe",
+        str(target),
+        "--flag",
+    ]
+
+
+def test_resolved_launch_command_leaves_custom_npm_like_wrapper_unchanged(monkeypatch, tmp_path):
+    _simulate_windows(monkeypatch)
+    cmd = tmp_path / "custom-agent.cmd"
+    target = tmp_path / "node_modules" / "fake-agent" / "index.js"
+    target.parent.mkdir(parents = True)
+    target.write_text("", encoding = "utf-8")
+    contents = _npm_node_cmd_shim(r"node_modules\fake-agent\index.js")
+    cmd.write_bytes(
+        contents.replace(
+            "CALL :find_dp0\r\n", "CALL :find_dp0\r\nSET AGENT_MODE=custom\r\n"
+        ).encode()
+    )
+
+    assert start._resolved_launch_command(str(cmd), ["--flag"]) == [str(cmd), "--flag"]
+
+
+def test_resolved_launch_command_leaves_non_npm_batch_file_unchanged(monkeypatch, tmp_path):
+    _simulate_windows(monkeypatch)
+    cmd = tmp_path / "custom-agent.cmd"
+    cmd.write_bytes(b'@echo off\r\n"%dp0%\\custom.exe" %*\r\n')
+
+    assert start._resolved_launch_command(str(cmd), ["--flag"]) == [str(cmd), "--flag"]
 
 
 @pytest.mark.skipif(
