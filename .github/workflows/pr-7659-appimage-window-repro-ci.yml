@@ -139,8 +139,12 @@ jobs:
           read -r x y w h < <(xdotool getwindowgeometry --shell "$wid" | awk -F= '/^(X|Y|WIDTH|HEIGHT)=/{printf "%s ",$2} END { print "" }')
           printf 'SETUP geometry=%sx%s position=%s,%s\n' "$w" "$h" "$x" "$y" | tee evidence/assertions.log
           (( w >= 750 && w <= 770 && h >= 550 && h <= 570 )) || { echo "FAIL expected setup 760x560, got ${w}x${h}" | tee -a evidence/assertions.log; exit 1; }
+          # The native window becomes visible before WebKit paints the React setup UI.
+          # Wait for Get Started, whose center is ~85px above the 560px window bottom.
+          sleep 5
+          import -display :99 -window root evidence/01-setup-ready.png
           xdotool windowactivate --sync "$wid"
-          xdotool mousemove --window "$wid" $((w/2)) $((h-55)) click 1
+          xdotool mousemove --window "$wid" $((w/2)) $((h-85)) click 1
           : > evidence/geometry-sequence.tsv
           for i in $(seq 0 100); do
             ms=$((i*40))
