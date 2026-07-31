@@ -300,7 +300,68 @@ jobs:
           fi
           BACKEND_PID=''
           BACKEND_PGID=''
-          echo "PASS live Tauri crash E2E: uncatchable crash self-reaped backend and relaunch recovered (cleanup status=$CLEAN_STATUS)"
+          echo "PASS baseline crash/relaunch: backend self-reaped before a later Tauri launch (cleanup status=$CLEAN_STATUS)"
+
+          # Exercise the existing adoption path at the dangerous boundary: a
+          # new Tauri starts immediately while the old backend is still healthy
+          # but its watchdog remains leased to the just-crashed app.
+          launch_tauri rapid-before-crash
+          RAPID_OLD_APP_PID="$APP_PID"
+          RAPID_OLD_BACKEND_PID="$BACKEND_PID"
+          RAPID_OLD_BACKEND_PGID="$BACKEND_PGID"
+          RAPID_PORT="$LIVE_PORT"
+          echo "CRASH RAPID app_pid=$RAPID_OLD_APP_PID backend_pid=$RAPID_OLD_BACKEND_PID port=$RAPID_PORT"
+          kill -KILL "$RAPID_OLD_APP_PID"
+          set +e
+          wait "$APP_WRAPPER_PID"
+          RAPID_CRASH_STATUS=$?
+          set -e
+          APP_WRAPPER_PID=''
+          APP_PID=''
+
+          echo "RAPID RELAUNCH while backend pid=$RAPID_OLD_BACKEND_PID is still serving"
+          env LD_PRELOAD="$XINITTHREADS_SHIM" "$BIN" >logs/tauri-rapid-relaunch.log 2>&1 &
+          APP_WRAPPER_PID=$!
+          APP_PID="$APP_WRAPPER_PID"
+
+          # Wait beyond the watchdog's two-second poll. A safe adoption/replace
+          # protocol must leave this new actual Tauri with a stable healthy
+          # backend rather than an owned_ready backend that dies underneath it.
+          sleep 5
+          deadline=$((SECONDS + 20))
+          RAPID_HEALTHY_PORT=''
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              echo "FAIL rapid relaunch: replacement Tauri exited"
+              cat logs/tauri-rapid-relaunch.log
+              exit 1
+            fi
+            for candidate in $(seq 8888 8908); do
+              if curl -fsS --max-time 1 "http://127.0.0.1:$candidate/api/liveness" \
+                | jq -e '.service == "Unsloth UI Backend"' >/dev/null 2>&1; then
+                RAPID_HEALTHY_PORT="$candidate"
+                break 2
+              fi
+            done
+            sleep 0.25
+          done
+          ps -eo pid,ppid,pgid,sid,stat,cmd >logs/processes-after-rapid-relaunch.txt
+          if [ -f "$OWNER" ]; then
+            jq '{schema_version,kind,app_pid,backend_pid,generation,requested_port,port,studio_root_id,started_at_ms,updated_at_ms}' \
+              "$OWNER" >logs/owner-rapid-relaunch-sanitized.json || true
+          fi
+          if [ -z "$RAPID_HEALTHY_PORT" ]; then
+            echo "FAIL rapid relaunch: new Tauri adopted or observed backend $RAPID_OLD_BACKEND_PID, then had no healthy backend after its old-parent watchdog fired"
+            cat logs/tauri-rapid-relaunch.log
+            exit 1
+          fi
+          sleep 3
+          if ! curl -fsS --max-time 1 "http://127.0.0.1:$RAPID_HEALTHY_PORT/api/liveness" >/dev/null 2>&1; then
+            echo "FAIL rapid relaunch: backend on $RAPID_HEALTHY_PORT was not stable"
+            exit 1
+          fi
+          curl -fsS "http://127.0.0.1:$unrelated_port/" >/dev/null
+          echo "PASS rapid relaunch: new Tauri retained a stable healthy backend after old app crash (crash status=$RAPID_CRASH_STATUS)"
 
       - name: Upload live crash evidence
         if: always()
