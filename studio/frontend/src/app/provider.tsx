@@ -42,19 +42,11 @@ interface AppProviderProps {
 
 type TauriWindowMode = "setup" | "app";
 type WindowLayoutGuard = () => boolean;
-type LogicalWindowSize = {
-  width: number;
-  height: number;
-};
 
 const MIN_WINDOW_WIDTH = 900;
 const MIN_WINDOW_HEIGHT = 600;
 const SETUP_WINDOW_WIDTH = 760;
 const SETUP_WINDOW_HEIGHT = 560;
-const MINIMUM_APP_WINDOW_SIZE: LogicalWindowSize = {
-  width: MIN_WINDOW_WIDTH,
-  height: MIN_WINDOW_HEIGHT,
-};
 
 async function showSetupWindow(isCurrent: WindowLayoutGuard): Promise<void> {
   const { getCurrentWindow, LogicalSize } = await import(
@@ -81,7 +73,6 @@ async function enforceMinimumWindowSize(
   >,
   LogicalSize: typeof import("@tauri-apps/api/window")["LogicalSize"],
   isCurrent: WindowLayoutGuard,
-  requestedSize: LogicalWindowSize = MINIMUM_APP_WINDOW_SIZE,
 ): Promise<void> {
   const [innerSize, scaleFactor] = await Promise.all([
     win.innerSize(),
@@ -91,19 +82,8 @@ async function enforceMinimumWindowSize(
 
   const logicalWidth = Math.round(innerSize.width / scaleFactor);
   const logicalHeight = Math.round(innerSize.height / scaleFactor);
-  // Linux reports innerSize from a cache updated by configure events. The
-  // AppImage's bundled GTK can deliver that event after this check, leaving the
-  // old setup size in the cache even though the first app resize has completed.
-  const nextWidth = Math.max(
-    logicalWidth,
-    MIN_WINDOW_WIDTH,
-    requestedSize.width,
-  );
-  const nextHeight = Math.max(
-    logicalHeight,
-    MIN_WINDOW_HEIGHT,
-    requestedSize.height,
-  );
+  const nextWidth = Math.max(logicalWidth, MIN_WINDOW_WIDTH);
+  const nextHeight = Math.max(logicalHeight, MIN_WINDOW_HEIGHT);
   if (nextWidth !== logicalWidth || nextHeight !== logicalHeight) {
     await win.setSize(new LogicalSize(nextWidth, nextHeight));
   }
@@ -135,7 +115,6 @@ async function applyAppWindowLayout(
   await win.setResizable(true);
   if (!isCurrent()) return;
 
-  let requestedSize: LogicalWindowSize | undefined;
   if (hasInitializedAppLayout && hasSavedState) {
     // Subsequent launch: plugin restores size/position/maximized, with built-in
     // off-screen protection for positions saved on a now-disconnected display.
@@ -156,7 +135,6 @@ async function applyAppWindowLayout(
       const targetH = Math.max(MIN_WINDOW_HEIGHT, Math.round(finalW / 1.618));
       finalH = Math.min(targetH, Math.round(screenH * 0.85));
     }
-    requestedSize = { width: finalW, height: finalH };
     await win.setSize(new LogicalSize(finalW, finalH));
     if (!isCurrent()) return;
     await win.center();
@@ -171,7 +149,7 @@ async function applyAppWindowLayout(
     minHeight: MIN_WINDOW_HEIGHT,
   });
   if (!isCurrent()) return;
-  await enforceMinimumWindowSize(win, LogicalSize, isCurrent, requestedSize);
+  await enforceMinimumWindowSize(win, LogicalSize, isCurrent);
 
   if (!isCurrent()) return;
   await invoke("mark_app_window_layout_initialized");
