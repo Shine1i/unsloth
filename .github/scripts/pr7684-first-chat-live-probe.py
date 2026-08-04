@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import httpx
+
 from playwright.async_api import Route, async_playwright
 from studio_test_kit.auth import login, seed_init_script
 from studio_test_kit.lifecycle import StudioInstall, launch_studio, stop_studio
@@ -51,6 +53,21 @@ async def main() -> None:
     try:
         password = read_password(home, install.bootstrap_password)
         auth = await login(base_url, "unsloth", password)
+        if auth.must_change_password:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    f"{base_url}/api/auth/change-password",
+                    headers={"Authorization": f"Bearer {auth.access_token}"},
+                    json={
+                        "current_password": password,
+                        "new_password": "Studio-CI-7684!",
+                    },
+                )
+                response.raise_for_status()
+                changed = response.json()
+            auth.access_token = changed["access_token"]
+            auth.refresh_token = changed.get("refresh_token", "")
+            auth.must_change_password = False
         init_script = seed_init_script(auth, [], connections_enabled=False)
 
         async def json_reply(route: Route, body: object, status: int = 200) -> None:
