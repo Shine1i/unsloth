@@ -23,6 +23,9 @@ public static class Pr8047Native {
   public static extern bool IsWindowVisible(IntPtr hWnd);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)]
   public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("user32.dll")]
   public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
   [DllImport("user32.dll")]
@@ -82,9 +85,10 @@ while ([DateTime]::UtcNow -lt $deadline -and $script:FoundHwnd -eq [IntPtr]::Zer
   $callback = [Pr8047Native+EnumWindowsProc]{
     param([IntPtr]$hWnd, [IntPtr]$lParam)
     if (-not [Pr8047Native]::IsWindowVisible($hWnd)) { return $true }
-    $text = New-Object Text.StringBuilder 512
-    [void][Pr8047Native]::GetWindowText($hWnd, $text, $text.Capacity)
-    if ($text.ToString() -eq "Unsloth") {
+    [uint32]$windowProcessId = 0
+    [void][Pr8047Native]::GetWindowThreadProcessId($hWnd, [ref]$windowProcessId)
+    $windowProcess = Get-Process -Id $windowProcessId -ErrorAction SilentlyContinue
+    if ($null -ne $windowProcess -and $windowProcess.ProcessName -eq "unsloth-studio") {
       $script:FoundHwnd = $hWnd
       return $false
     }
