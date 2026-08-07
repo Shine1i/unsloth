@@ -1,0 +1,237 @@
+name: PR 8055 Thin AppImage Live Repro
+
+on:
+  push:
+    branches:
+      - 'pr-8055-thin-appimage-live-repro-ci-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-8055-thin-appimage-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  thin-appimage-live:
+    name: Build and live-launch thin AppImage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+      APPIMAGE_RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+      APPIMAGE_RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Install Linux desktop build and runtime dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev patchelf libfuse2 xvfb
+          ldconfig -p | grep -E 'lib(ayatana-)?appindicator3\.so' | tee /tmp/appindicator-cache.txt
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          save-if: false
+          workspaces: studio/src-tauri -> target
+
+      - name: Install pinned desktop dependencies
+        run: |
+          set -euo pipefail
+          npm ci --prefix studio --no-fund --no-audit
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          test "$(npx --prefix studio tauri --version)" = 'tauri-cli 2.10.1'
+
+      - name: Build the real Linux deb
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ''
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: |
+          set -euo pipefail
+          npx --prefix studio tauri build -v --bundles deb \
+            --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          deb="$(find studio/src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -f "$deb"
+          echo "DEB_PATH=$deb" >> "$GITHUB_ENV"
+          echo "Built deb: $deb"
+
+      - name: Build the real thin AppImage
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/appimage-tools"
+          mkdir -p "$tools" "$RUNNER_TEMP/live-logs"
+          curl -fsSL "$APPIMAGETOOL_URL" -o "$tools/appimagetool"
+          curl -fsSL "$APPIMAGE_RUNTIME_URL" -o "$tools/runtime"
+          echo "$APPIMAGETOOL_SHA256  $tools/appimagetool" | sha256sum -c -
+          echo "$APPIMAGE_RUNTIME_SHA256  $tools/runtime" | sha256sum -c -
+          chmod +x "$tools/appimagetool"
+          appimage="$RUNNER_TEMP/unsloth-studio-pr8055.AppImage"
+          studio/src-tauri/linux/build-thin-appimage.sh \
+            "$DEB_PATH" "$tools/appimagetool" "$tools/runtime" "$appimage"
+          test -x "$appimage"
+          echo "APPIMAGE_PATH=$appimage" >> "$GITHUB_ENV"
+          file "$appimage"
+          du -h "$appimage"
+
+      - name: Verify missing tray dependency shows guidance before launch
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/extracted"
+          mkdir -p "$root" "$RUNNER_TEMP/fake-tools" "$RUNNER_TEMP/no-libraries"
+          (cd "$root" && "$APPIMAGE_PATH" --appimage-extract >/dev/null)
+          appdir="$root/squashfs-root"
+          cat > "$RUNNER_TEMP/fake-tools/ldd" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            */usr/bin/unsloth-studio) exec /usr/bin/ldd "$1" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          cat > "$RUNNER_TEMP/fake-tools/ldconfig" <<'SH'
+          #!/bin/sh
+          exit 0
+          SH
+          for tool in zenity xmessage; do
+            printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/fake-tools/$tool"
+          done
+          chmod +x "$RUNNER_TEMP/fake-tools/"*
+          set +e
+          APPDIR="$appdir" LD_LIBRARY_PATH="$RUNNER_TEMP/no-libraries" \
+            PATH="$RUNNER_TEMP/fake-tools:$PATH" \
+            "$appdir/AppRun" > "$RUNNER_TEMP/live-logs/missing-tray.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/live-logs/missing-tray.log"
+          test "$rc" -eq 127
+          grep -F 'libayatana-appindicator3.so.1 or libappindicator3.so.1' \
+            "$RUNNER_TEMP/live-logs/missing-tray.log"
+          grep -F 'sudo apt install libayatana-appindicator3-1' \
+            "$RUNNER_TEMP/live-logs/missing-tray.log"
+          echo 'PASS missing tray library exits 127 with dependency guidance'
+
+      - name: Live-launch AppImage with poisoned Python environment
+        env:
+          G_MESSAGES_DEBUG: all
+          RUST_BACKTRACE: full
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/live-home"
+          host_libs="$RUNNER_TEMP/host-library-path"
+          trace="$RUNNER_TEMP/live-logs/managed-env.log"
+          mkdir -p "$home/.unsloth/studio/unsloth_studio/bin" "$home/.config" \
+            "$home/xdg" "$host_libs"
+          stub="$home/.unsloth/studio/unsloth_studio/bin/unsloth"
+          version="$(sed -n 's/.*MIN_DESKTOP_BACKEND_VERSION: &str = "\([^"]*\)".*/\1/p' \
+            studio/src-tauri/src/preflight/version.rs)"
+          test -n "$version"
+          cat > "$stub" <<'STUB'
+          #!/bin/sh
+          printf 'args=%s|PYTHONHOME=%s|PYTHONPATH=%s|LD_LIBRARY_PATH=%s\n' \
+            "$*" "${PYTHONHOME-__UNSET__}" "${PYTHONPATH-__UNSET__}" \
+            "${LD_LIBRARY_PATH-__UNSET__}" >> "${LIVE_TRACE:?}"
+          case "$*" in
+            "-h") exit 0 ;;
+            *desktop-capabilities*)
+              printf '%s\n' '{"desktop_protocol_version":1,"desktop_manageability_version":2,"supports_api_only":true,"supports_provision_desktop_auth":true,"supports_desktop_backend_ownership":true,"studio_install_ok":true,"version":"__STUB_VERSION__"}'
+              exit 0 ;;
+            *provision-desktop-auth*) exit 0 ;;
+            *studio*--api-only*) exec sleep 90 ;;
+          esac
+          exit 0
+          STUB
+          sed -i "s/__STUB_VERSION__/$version/" "$stub"
+          chmod +x "$stub"
+
+          export HOME="$home" XDG_RUNTIME_DIR="$home/xdg" XDG_CONFIG_HOME="$home/.config"
+          export LIVE_TRACE="$trace" LD_LIBRARY_PATH="$host_libs"
+          export PYTHONHOME=/definitely/poisoned/pythonhome
+          export PYTHONPATH=/definitely/poisoned/pythonpath
+          unset UNSLOTH_STUDIO_HOME STUDIO_HOME
+
+          xvfb-run -a --server-args='-screen 0 1440x900x24' \
+            "$APPIMAGE_PATH" > "$RUNNER_TEMP/live-logs/normal-launch.log" 2>&1 &
+          app_pid=$!
+          for _ in $(seq 1 35); do
+            if ! kill -0 "$app_pid" 2>/dev/null; then break; fi
+            if [ -s "$trace" ] && grep -q 'desktop-capabilities' "$trace"; then break; fi
+            sleep 1
+          done
+          if ! kill -0 "$app_pid" 2>/dev/null; then
+            rc=0; wait "$app_pid" || rc=$?
+            echo "::error::AppImage exited early with rc=$rc"
+            tail -100 "$RUNNER_TEMP/live-logs/normal-launch.log" || true
+            exit 1
+          fi
+          sleep 5
+          kill -TERM "$app_pid" 2>/dev/null || true
+          wait "$app_pid" 2>/dev/null || true
+
+          cat "$trace"
+          test -s "$trace"
+          grep -q 'args=-h|' "$trace"
+          grep -q 'desktop-capabilities' "$trace"
+          if grep -vF "PYTHONHOME=__UNSET__|PYTHONPATH=__UNSET__|LD_LIBRARY_PATH=$host_libs" "$trace"; then
+            echo '::error::a managed subprocess inherited poisoned Python variables or lost LD_LIBRARY_PATH'
+            exit 1
+          fi
+          echo 'PASS real AppImage launched; managed subprocesses scrubbed Python overrides and preserved host LD_LIBRARY_PATH'
+
+      - name: Live-check broken LD_LIBRARY_PATH tray candidates
+        env:
+          G_MESSAGES_DEBUG: all
+          RUST_BACKTRACE: full
+        run: |
+          set -euo pipefail
+          bad="$RUNNER_TEMP/broken-appindicator"
+          mkdir -p "$bad"
+          for name in \
+            libayatana-appindicator3.so.1 libappindicator3.so.1 \
+            libayatana-appindicator3.so libappindicator3.so; do
+            printf 'not an ELF shared object\n' > "$bad/$name"
+          done
+
+          set +e
+          timeout --signal=TERM 25s xvfb-run -a --server-args='-screen 0 1440x900x24' \
+            env HOME="$RUNNER_TEMP/live-home" \
+              XDG_RUNTIME_DIR="$RUNNER_TEMP/live-home/xdg" \
+              XDG_CONFIG_HOME="$RUNNER_TEMP/live-home/.config" \
+              LIVE_TRACE="$RUNNER_TEMP/live-logs/shadowed-managed-env.log" \
+              LD_LIBRARY_PATH="$bad" \
+              "$APPIMAGE_PATH" > "$RUNNER_TEMP/live-logs/broken-precedence.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/live-logs/broken-precedence.log"
+
+          if [ "$rc" -eq 127 ] && grep -q 'required Linux libraries are missing' \
+            "$RUNNER_TEMP/live-logs/broken-precedence.log"; then
+            echo 'PASS broken loader-precedence candidate was rejected with dependency guidance'
+          elif [ "$rc" -eq 124 ]; then
+            echo 'PASS real loader remained healthy despite the shadowing candidates'
+          else
+            echo "::error::preflight approved broken LD_LIBRARY_PATH candidates, then the desktop crashed (rc=$rc)"
+            exit 1
+          fi
+
+      - name: Upload live evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr8055-thin-appimage-live-evidence
+          path: ${{ runner.temp }}/live-logs
+          if-no-files-found: warn
+          retention-days: 7
