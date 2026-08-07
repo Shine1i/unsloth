@@ -84,93 +84,11 @@ function wasLaunchedHidden(): Promise<boolean> {
   return launchedHidden;
 }
 
-type WindowLayoutObserver = {
-  waitForSettled: () => Promise<void>;
-  dispose: () => void;
-};
-
-const WINDOW_LAYOUT_POLL_MS = 50;
-const WINDOW_LAYOUT_FALLBACK_MS = 300;
-const WINDOW_LAYOUT_TIMEOUT_MS = 1000;
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-}
-
-/** Watches native geometry changes that may arrive after a restore call resolves. */
-async function observeWindowLayout(
-  win: TauriWindow,
-  isCurrent: WindowLayoutGuard,
-): Promise<WindowLayoutObserver | null> {
-  let revision = 0;
-  const noteChange = () => {
-    revision += 1;
-  };
-  const unlistenResized = await win.onResized(noteChange);
-  let unlistenMoved: (() => void) | undefined;
-  try {
-    unlistenMoved = await win.onMoved(noteChange);
-  } catch (error) {
-    unlistenResized();
-    throw error;
-  }
-  if (!isCurrent()) {
-    unlistenResized();
-    unlistenMoved();
-    return null;
-  }
-
-  return {
-    waitForSettled: async () => {
-      let observedRevision = revision;
-      let sawPostShowChange = false;
-      for (
-        let elapsed = 0;
-        elapsed < WINDOW_LAYOUT_TIMEOUT_MS && isCurrent();
-        elapsed += WINDOW_LAYOUT_POLL_MS
-      ) {
-        await delay(WINDOW_LAYOUT_POLL_MS);
-        if (revision !== observedRevision) {
-          observedRevision = revision;
-          sawPostShowChange = true;
-          continue;
-        }
-        if (
-          sawPostShowChange ||
-          elapsed + WINDOW_LAYOUT_POLL_MS >= WINDOW_LAYOUT_FALLBACK_MS
-        ) {
-          return;
-        }
-      }
-    },
-    dispose: () => {
-      unlistenResized();
-      unlistenMoved();
-    },
-  };
-}
-
-function measureTauriWindowLayout(
-  windowModule: WindowModule,
-  win: TauriWindow,
-  isCurrent: WindowLayoutGuard,
-): Promise<MeasuredWindowLayout<TauriMonitor> | null> {
-  return measureWindowLayout(
-    {
-      currentMonitor: () => windowModule.currentMonitor(),
-      primaryMonitor: () => windowModule.primaryMonitor(),
-      innerSize: () => win.innerSize(),
-      outerSize: () => win.outerSize(),
-    },
-    isCurrent,
-  );
-}
-
 /** Sizes the window and centers it inside the work area. */
 async function placeWindow(
   win: TauriWindow,
   { LogicalSize, PhysicalPosition }: WindowModule,
-  { monitor, frameSize }: MeasuredWindowLayout<TauriMonitor>,
+  { monitor }: MeasuredWindowLayout<TauriMonitor>,
   size: LogicalWindowSize,
   isCurrent: WindowLayoutGuard,
 ): Promise<void> {
@@ -184,8 +102,8 @@ async function placeWindow(
   const scaleFactor = await win.scaleFactor();
   if (!isCurrent()) return;
   const position = calculateCenteredPosition(monitor.workArea, {
-    width: Math.round(size.width * scaleFactor) + frameSize.width,
-    height: Math.round(size.height * scaleFactor) + frameSize.height,
+    width: Math.round(size.width * scaleFactor),
+    height: Math.round(size.height * scaleFactor),
   });
   await win.setPosition(new PhysicalPosition(position.x, position.y));
 }
@@ -203,7 +121,7 @@ async function showSetupWindow(isCurrent: WindowLayoutGuard): Promise<void> {
   if (!isCurrent()) return;
   await win.setResizable(false);
   if (!isCurrent()) return;
-  const measured = await measureTauriWindowLayout(windowModule, win, isCurrent);
+  const measured = await measureWindowLayout(windowModule, isCurrent);
   if (!measured) return;
   // Keep the non-resizable setup window fully visible.
   const setupSize = fitWindowSize(
@@ -250,8 +168,9 @@ async function applyAppWindowLayout(
 ): Promise<void> {
   const windowModule = await import("@tauri-apps/api/window");
   const { invoke } = await import("@tauri-apps/api/core");
-  const { restoreStateCurrent, StateFlags } =
-    await import("@tauri-apps/plugin-window-state");
+  const { restoreStateCurrent, StateFlags } = await import(
+    "@tauri-apps/plugin-window-state"
+  );
   if (!isCurrent()) return;
 
   const win = windowModule.getCurrentWindow();
@@ -267,70 +186,63 @@ async function applyAppWindowLayout(
 
   await win.setResizable(true);
   if (!isCurrent()) return;
-  const measured = await measureTauriWindowLayout(windowModule, win, isCurrent);
+  let measured = await measureWindowLayout(windowModule, isCurrent);
   if (!measured) return;
 
   let requestedSize: LogicalWindowSize | undefined;
   let restored = false;
-  let layoutObserver: WindowLayoutObserver | null = null;
-  try {
-    if (hasInitializedAppLayout && hasSavedState) {
-      restored = true;
-      // Subscribe before restoring so native events cannot race listener setup.
-      layoutObserver = await observeWindowLayout(win, isCurrent);
-      if (!layoutObserver) return;
-      // Subsequent launch: plugin restores size/position/maximized, with built-in
-      // off-screen protection for positions saved on a now-disconnected display.
-      await restoreStateCurrent(
-        StateFlags.SIZE | StateFlags.POSITION | StateFlags.MAXIMIZED,
-      );
-      if (!isCurrent()) return;
-    } else {
-      // First launch: fit to the current work area and center.
-      const cssSafeLogicalWidth = measured.monitor
-        ? Math.round(
-            MIN_DESKTOP_LAYOUT_WIDTH *
-              logicalPerCssPx(measured.monitor.scaleFactor),
-          )
-        : undefined;
-      requestedSize = calculateFirstAppWindowSize(
-        measured.bounds,
-        cssSafeLogicalWidth,
-      );
-      await placeWindow(win, windowModule, measured, requestedSize, isCurrent);
-    }
-    // Apply work-area constraints after restore to preserve the saved size.
-    await finalizeAppWindowLayout({
-      restored,
-      measured,
-      show: async () => {
-        if (await wasLaunchedHidden()) return;
-        if (!isCurrent()) return;
-        await win.show();
-      },
-      waitForSettled: layoutObserver?.waitForSettled,
-      measure: () => measureTauriWindowLayout(windowModule, win, isCurrent),
-      setMinimumConstraints: (minimum) =>
-        win.setSizeConstraints({
-          minWidth: minimum.width,
-          minHeight: minimum.height,
-        }),
-      enforceBounds: (bounds) =>
-        enforceWindowSizeBounds(
-          win,
-          windowModule.LogicalSize,
-          isCurrent,
-          bounds,
-          requestedSize,
-        ),
-      isCurrent,
-    });
-
+  if (hasInitializedAppLayout && hasSavedState) {
+    restored = true;
+    // Subsequent launch: plugin restores size/position/maximized, with built-in
+    // off-screen protection for positions saved on a now-disconnected display.
+    await restoreStateCurrent(
+      StateFlags.SIZE | StateFlags.POSITION | StateFlags.MAXIMIZED,
+    );
     if (!isCurrent()) return;
-    await invoke("mark_app_window_layout_initialized");
-  } finally {
-    layoutObserver?.dispose();
+    // Remeasure after restore in case the window moved to another monitor.
+    measured = (await measureWindowLayout(windowModule, isCurrent)) ?? measured;
+  } else {
+    // First launch: fit to the current work area and center.
+    const cssSafeLogicalWidth = measured.monitor
+      ? Math.round(
+          MIN_DESKTOP_LAYOUT_WIDTH *
+            logicalPerCssPx(measured.monitor.scaleFactor),
+        )
+      : undefined;
+    requestedSize = calculateFirstAppWindowSize(
+      measured.bounds,
+      cssSafeLogicalWidth,
+    );
+    await placeWindow(win, windowModule, measured, requestedSize, isCurrent);
   }
+  // Apply work-area constraints after restore to preserve the saved size.
+  await finalizeAppWindowLayout({
+    restored,
+    measured,
+    show: async () => {
+      if (await wasLaunchedHidden()) return;
+      if (!isCurrent()) return;
+      await win.show();
+    },
+    measure: () => measureWindowLayout(windowModule, isCurrent),
+    setMinimumConstraints: (minimum) =>
+      win.setSizeConstraints({
+        minWidth: minimum.width,
+        minHeight: minimum.height,
+      }),
+    enforceBounds: (bounds) =>
+      enforceWindowSizeBounds(
+        win,
+        windowModule.LogicalSize,
+        isCurrent,
+        bounds,
+        requestedSize,
+      ),
+    isCurrent,
+  });
+
+  if (!isCurrent()) return;
+  await invoke("mark_app_window_layout_initialized");
 }
 
 async function showWindowFallback(): Promise<void> {
@@ -667,7 +579,10 @@ function TauriWrapper({ children }: { children: ReactNode }) {
         </>
       }
     >
-      <LlamaUpdateBanner positioned={false} enabled={!hidesTitlebarSidebar} />
+      <LlamaUpdateBanner
+        positioned={false}
+        enabled={!hidesTitlebarSidebar}
+      />
       <DownloadManagerPanel positioned={false} />
     </TauriUpdateLayer>
   ) : (
@@ -708,10 +623,10 @@ function TauriWrapper({ children }: { children: ReactNode }) {
           }
           style={
             nativeMacControlsHidden
-              ? ({
+              ? {
                   ...MAC_NATIVE_CHROME_STYLE,
                   "--studio-mac-traffic-light-inset": "6px",
-                } as CSSProperties)
+                } as CSSProperties
               : MAC_NATIVE_CHROME_STYLE
           }
         >
