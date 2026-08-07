@@ -125,6 +125,15 @@ jobs:
       - name: Launch desktop and assert outer geometry
         shell: pwsh
         run: |
+
+          # Force the setup window through the fit-to-work-area path. The fixed
+          # code reserves the native outer frame; the old code sizes the inner
+          # rectangle to the entire work area and the assertion below catches it.
+          $layoutPath = Join-Path $PWD "studio/frontend/src/app/window-layout.ts"
+          $layout = Get-Content $layoutPath -Raw
+          $oversized = $layout -replace '(?m)^  width: 760,\r?\n  height: 560,$', "  width: 1200,`n  height: 900,"
+          if ($oversized -eq $layout) { throw "failed to force oversized setup window" }
+          Set-Content $layoutPath $oversized -NoNewline
           $stdout = Join-Path $PWD "logs/tauri-dev.stdout.log"
           $stderr = Join-Path $PWD "logs/tauri-dev.stderr.log"
           $process = Start-Process npm.cmd -ArgumentList "exec", "--", "tauri", "dev", "--no-watch" `

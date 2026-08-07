@@ -51,40 +51,27 @@ function Set-WorkArea([int]$Left, [int]$Top, [int]$Right, [int]$Bottom) {
 
 if ($Mode -eq "set") {
   $original = Get-WorkArea
-  $right = $original.Left + [Math]::Min($original.Right - $original.Left, 800)
-  $bottom = $original.Top + [Math]::Min($original.Bottom - $original.Top, 500)
-  if (($right - $original.Left) -lt 800 -or ($bottom - $original.Top) -lt 400) {
-    throw "runner work area is too small for the compact test: $($original.Right)x$($original.Bottom)"
-  }
-
-  $explorerStopped = $false
-  Set-WorkArea $original.Left $original.Top $right $bottom
-  $target = Get-WorkArea
-  if ($target.Left -ne $original.Left -or $target.Top -ne $original.Top -or
-      $target.Right -ne $right -or $target.Bottom -ne $bottom) {
-    # Explorer immediately reapplies the taskbar work area on hosted runners.
-    # Stop it for this disposable VM so SPI_SETWORKAREA remains deterministic.
-    Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force
-    $explorerStopped = $true
-    Start-Sleep -Seconds 2
-    Set-WorkArea $original.Left $original.Top $right $bottom
-    $target = Get-WorkArea
-  }
-
   @{
     Left = $original.Left; Top = $original.Top
     Right = $original.Right; Bottom = $original.Bottom
-    ExplorerStopped = $explorerStopped
   } | ConvertTo-Json | Set-Content logs/original-workarea.json
+  $right = [Math]::Min($original.Right, 1000)
+  $bottom = [Math]::Min($original.Bottom, 500)
+  if (($right - $original.Left) -lt 800 -or ($bottom - $original.Top) -lt 400) {
+    throw "runner work area is too small for the compact test: $($original.Right)x$($original.Bottom)"
+  }
+  Set-WorkArea $original.Left $original.Top $right $bottom
+  $target = Get-WorkArea
   @{
     Left = $target.Left; Top = $target.Top
     Right = $target.Right; Bottom = $target.Bottom
   } | ConvertTo-Json | Set-Content logs/target-workarea.json
-  if ($target.Left -ne $original.Left -or $target.Top -ne $original.Top -or
-      $target.Right -ne $right -or $target.Bottom -ne $bottom) {
-    throw "compact Windows work area did not stick: requested=$($right-$original.Left)x$($bottom-$original.Top), actual=$($target.Right-$target.Left)x$($target.Bottom-$target.Top)"
+  $targetWidth = $target.Right - $target.Left
+  $targetHeight = $target.Bottom - $target.Top
+  if ($targetWidth -gt 1024 -or $targetHeight -gt 720) {
+    throw "runner work area is too large for the oversized-window fit test: ${targetWidth}x${targetHeight}"
   }
-  Write-Host "PASS compact Windows work area set to $($target.Right-$target.Left)x$($target.Bottom-$target.Top)@$($target.Left),$($target.Top)"
+  Write-Host "PASS Windows work area under test is ${targetWidth}x${targetHeight}@$($target.Left),$($target.Top)"
   exit 0
 }
 
@@ -92,11 +79,6 @@ if ($Mode -eq "restore") {
   if (Test-Path logs/original-workarea.json) {
     $saved = Get-Content logs/original-workarea.json | ConvertFrom-Json
     Set-WorkArea $saved.Left $saved.Top $saved.Right $saved.Bottom
-
-    if ($saved.ExplorerStopped) {
-      Start-Process explorer.exe
-      Start-Sleep -Seconds 2
-    }
     Write-Host "PASS original Windows work area restored"
   }
   exit 0
