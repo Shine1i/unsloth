@@ -1,0 +1,149 @@
+name: PR 8047 desktop window live geometry
+
+on:
+  push:
+    branches:
+      - "pr-8047-window-layout-live-repro-ci*"
+
+permissions:
+  contents: read
+
+jobs:
+  logic:
+    name: deterministic layout contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: studio/frontend/package-lock.json
+      - run: npm ci
+        working-directory: studio/frontend
+      - name: Run focused layout tests and typecheck
+        working-directory: studio/frontend
+        run: |
+          node --experimental-strip-types --test tests/window-layout.test.ts
+          npm run typecheck
+
+  linux-live:
+    name: live Tauri geometry (Linux/X11)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            studio/package-lock.json
+            studio/frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: studio/src-tauri
+      - name: Install Tauri and X11 runtime dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential dbus-x11 libayatana-appindicator3-dev libgtk-3-dev \
+            librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev muffin python3-xlib \
+            scrot wmctrl x11-utils xdotool xvfb
+          npm ci --prefix studio
+          npm ci --prefix studio/frontend
+      - name: Launch desktop against a 1000x460 work area
+        env:
+          DISPLAY: :99
+          G_MESSAGES_DEBUG: all
+          WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+        run: |
+          set -euxo pipefail
+          mkdir -p logs
+          Xvfb :99 -screen 0 1000x500x24 -ac -nolisten tcp >logs/xvfb.log 2>&1 &
+          echo $! > logs/xvfb.pid
+          for i in $(seq 1 30); do xdpyinfo >/dev/null 2>&1 && break; sleep 1; done
+          eval "$(dbus-launch --sh-syntax)"
+          muffin --replace --sm-disable >logs/muffin.log 2>&1 &
+          echo $! > logs/muffin.pid
+          for i in $(seq 1 30); do
+            xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id' && break
+            sleep 1
+          done
+          python3 .github/scripts/pr8047_linux_geometry.py dock >logs/dock.log 2>&1 &
+          echo $! > logs/dock.pid
+          for i in $(seq 1 30); do
+            xprop -root _NET_WORKAREA 2>/dev/null | grep -q '1000, 460' && break
+            sleep 1
+          done
+          xprop -root _NET_WORKAREA | tee logs/workarea.txt
+          (cd studio && npm exec -- tauri dev --no-watch) >logs/tauri-dev.log 2>&1 &
+          echo $! > logs/tauri-dev.pid
+          python3 .github/scripts/pr8047_linux_geometry.py assert | tee logs/assertion.txt
+          scrot logs/linux-desktop.png || true
+      - name: Stop live desktop processes
+        if: always()
+        env:
+          DISPLAY: :99
+        run: |
+          pkill -f unsloth-studio || true
+          for file in logs/*.pid; do [ -f "$file" ] && kill "$(cat "$file")" 2>/dev/null || true; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr8047-linux-live-geometry
+          path: logs/
+          if-no-files-found: warn
+
+  windows-live:
+    name: live Tauri geometry (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            studio/package-lock.json
+            studio/frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: studio/src-tauri
+      - name: Install frontend and Tauri CLI
+        shell: pwsh
+        run: |
+          npm ci --prefix studio
+          npm ci --prefix studio/frontend
+      - name: Set compact Windows work area
+        shell: pwsh
+        run: .github/scripts/pr8047_windows_geometry.ps1 set
+      - name: Launch desktop and assert outer geometry
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $PWD "logs/tauri-dev.stdout.log"
+          $stderr = Join-Path $PWD "logs/tauri-dev.stderr.log"
+          $process = Start-Process npm.cmd -ArgumentList "exec", "--", "tauri", "dev", "--no-watch" `
+            -WorkingDirectory (Join-Path $PWD "studio") -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr -PassThru
+          Set-Content logs/tauri-dev.pid $process.Id
+          .github/scripts/pr8047_windows_geometry.ps1 assert | Tee-Object logs/assertion.txt
+      - name: Restore work area and stop desktop
+        if: always()
+        shell: pwsh
+        run: |
+          .github/scripts/pr8047_windows_geometry.ps1 restore
+          Get-Process unsloth-studio -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path logs/tauri-dev.pid) {
+            taskkill /PID (Get-Content logs/tauri-dev.pid) /T /F 2>$null
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr8047-windows-live-geometry
+          path: logs/
+          if-no-files-found: warn
