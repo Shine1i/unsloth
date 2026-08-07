@@ -51,21 +51,39 @@ function Set-WorkArea([int]$Left, [int]$Top, [int]$Right, [int]$Bottom) {
 
 if ($Mode -eq "set") {
   $original = Get-WorkArea
-  @{
-    Left = $original.Left; Top = $original.Top
-    Right = $original.Right; Bottom = $original.Bottom
-  } | ConvertTo-Json | Set-Content logs/original-workarea.json
-  $right = [Math]::Min($original.Right, 1000)
-  $bottom = [Math]::Min($original.Bottom, 500)
+  $right = $original.Left + [Math]::Min($original.Right - $original.Left, 800)
+  $bottom = $original.Top + [Math]::Min($original.Bottom - $original.Top, 500)
   if (($right - $original.Left) -lt 800 -or ($bottom - $original.Top) -lt 400) {
     throw "runner work area is too small for the compact test: $($original.Right)x$($original.Bottom)"
   }
+
+  $explorerStopped = $false
   Set-WorkArea $original.Left $original.Top $right $bottom
   $target = Get-WorkArea
+  if ($target.Left -ne $original.Left -or $target.Top -ne $original.Top -or
+      $target.Right -ne $right -or $target.Bottom -ne $bottom) {
+    # Explorer immediately reapplies the taskbar work area on hosted runners.
+    # Stop it for this disposable VM so SPI_SETWORKAREA remains deterministic.
+    Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force
+    $explorerStopped = $true
+    Start-Sleep -Seconds 2
+    Set-WorkArea $original.Left $original.Top $right $bottom
+    $target = Get-WorkArea
+  }
+
+  @{
+    Left = $original.Left; Top = $original.Top
+    Right = $original.Right; Bottom = $original.Bottom
+    ExplorerStopped = $explorerStopped
+  } | ConvertTo-Json | Set-Content logs/original-workarea.json
   @{
     Left = $target.Left; Top = $target.Top
     Right = $target.Right; Bottom = $target.Bottom
   } | ConvertTo-Json | Set-Content logs/target-workarea.json
+  if ($target.Left -ne $original.Left -or $target.Top -ne $original.Top -or
+      $target.Right -ne $right -or $target.Bottom -ne $bottom) {
+    throw "compact Windows work area did not stick: requested=$($right-$original.Left)x$($bottom-$original.Top), actual=$($target.Right-$target.Left)x$($target.Bottom-$target.Top)"
+  }
   Write-Host "PASS compact Windows work area set to $($target.Right-$target.Left)x$($target.Bottom-$target.Top)@$($target.Left),$($target.Top)"
   exit 0
 }
@@ -74,6 +92,11 @@ if ($Mode -eq "restore") {
   if (Test-Path logs/original-workarea.json) {
     $saved = Get-Content logs/original-workarea.json | ConvertFrom-Json
     Set-WorkArea $saved.Left $saved.Top $saved.Right $saved.Bottom
+
+    if ($saved.ExplorerStopped) {
+      Start-Process explorer.exe
+      Start-Sleep -Seconds 2
+    }
     Write-Host "PASS original Windows work area restored"
   }
   exit 0
@@ -88,7 +111,12 @@ while ([DateTime]::UtcNow -lt $deadline -and $script:FoundHwnd -eq [IntPtr]::Zer
     [uint32]$windowProcessId = 0
     [void][Pr8047Native]::GetWindowThreadProcessId($hWnd, [ref]$windowProcessId)
     $windowProcess = Get-Process -Id $windowProcessId -ErrorAction SilentlyContinue
-    if ($null -ne $windowProcess -and $windowProcess.ProcessName -eq "unsloth-studio") {
+    $candidate = New-Object Pr8047Native+RECT
+    $hasRect = [Pr8047Native]::GetWindowRect($hWnd, [ref]$candidate)
+    $candidateWidth = $candidate.Right - $candidate.Left
+    $candidateHeight = $candidate.Bottom - $candidate.Top
+    if ($null -ne $windowProcess -and $windowProcess.ProcessName -eq "unsloth-studio" -and
+        $hasRect -and $candidateWidth -ge 400 -and $candidateHeight -ge 200) {
       $script:FoundHwnd = $hWnd
       return $false
     }
@@ -114,6 +142,10 @@ $geometry = @{
   work_width = $work.Right - $work.Left; work_height = $work.Bottom - $work.Top
 }
 $geometry | ConvertTo-Json | Set-Content logs/windows-geometry.json
+
+if ($geometry.client_width -lt 400 -or $geometry.client_height -lt 200) {
+  throw "FAIL live Windows probe found a non-app helper window: $($geometry | ConvertTo-Json -Compress)"
+}
 
 if ($geometry.frame_width -le 0 -and $geometry.frame_height -le 0) {
   throw "FAIL live Windows window exposed no outer/client frame delta: $($geometry | ConvertTo-Json -Compress)"
