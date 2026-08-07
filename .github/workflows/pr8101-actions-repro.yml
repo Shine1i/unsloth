@@ -1,0 +1,186 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 8101 Actions Repro"
+
+on:
+  push:
+    branches:
+      - "pr-8101-actions-repro-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  id-token: write
+
+jobs:
+  seed:
+    name: "Seed cache (${{ matrix.os }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      CACHE_KEY: pr8101-actions-${{ matrix.os }}-${{ github.run_id }}
+    steps:
+      - name: Harden runner in audit mode
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout with v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node with v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Setup Python with v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Assert checkout and tool setup
+        shell: bash
+        run: |
+          test -f pyproject.toml
+          test "$(node -p 'process.versions.node.split(`.`)[0]')" = "24"
+          python - <<'PY'
+          import sys
+          assert sys.version_info[:2] == (3, 12), sys.version
+          print(f"PASS setup runner={sys.platform} python={sys.version.split()[0]}")
+          PY
+
+      - name: Probe split cache restore
+        id: split_restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .pr8101-cache
+          key: ${{ env.CACHE_KEY }}
+
+      - name: Create cache marker
+        shell: bash
+        run: |
+          mkdir -p .pr8101-cache
+          printf '%s\n' "${{ runner.os }}:${{ github.run_id }}" > .pr8101-cache/marker.txt
+
+      - name: Probe split cache save
+        if: steps.split_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .pr8101-cache
+          key: ${{ env.CACHE_KEY }}
+
+      - name: Upload marker with artifact v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr8101-${{ runner.os }}-${{ github.run_attempt }}
+          path: .pr8101-cache/marker.txt
+          if-no-files-found: error
+
+  consume:
+    name: "Restore combined cache (${{ matrix.os }})"
+    needs: seed
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      CACHE_KEY: pr8101-actions-${{ matrix.os }}-${{ github.run_id }}
+    steps:
+      - name: Harden runner in audit mode
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout with v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore with combined cache v6
+        id: combined_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .pr8101-cache
+          key: ${{ env.CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - name: Assert cache round trip
+        shell: bash
+        run: |
+          test "${{ steps.combined_cache.outputs.cache-hit }}" = "true"
+          test "$(cat .pr8101-cache/marker.txt)" = "${{ runner.os }}:${{ github.run_id }}"
+          echo "PASS cache round trip on ${{ runner.os }}"
+
+  security-actions:
+    name: "Security and maintenance actions"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Harden runner in audit mode
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Scorecard without publishing
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: false
+          file_mode: git
+
+      - name: Assert Scorecard output
+        shell: bash
+        run: |
+          test -s results.sarif
+          python - <<'PY'
+          import json
+          with open("results.sarif", encoding="utf-8") as f:
+              data = json.load(f)
+          assert data.get("version") == "2.1.0", data.get("version")
+          print("PASS scorecard SARIF")
+          PY
+
+      - name: Upload Scorecard artifact with v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr8101-scorecard-${{ github.run_attempt }}
+          path: results.sarif
+          if-no-files-found: error
+
+      - name: Scan the repro commit with TruffleHog
+        uses: trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11 # v3.96.0
+        with:
+          path: ./
+          base: ${{ github.event.before }}
+          head: ${{ github.sha }}
+          extra_args: --only-verified
+
+      - name: Start stale v11 in debug-only no-op mode
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          debug-only: true
+          days-before-stale: -1
+          days-before-close: -1
+          operations-per-run: 1
+          enable-statistics: false
+
+      - name: Report targeted pass
+        shell: bash
+        run: echo "PASS non-Tauri security and maintenance action probes"
