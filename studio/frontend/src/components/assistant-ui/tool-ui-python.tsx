@@ -3,28 +3,28 @@
 
 "use client";
 
-import { getAuthToken } from "@/features/auth/session";
-import { apiUrl } from "@/lib/api-base";
-import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
-import { useToolArgsStatus } from "@assistant-ui/react";
-import { CodeIcon } from "lucide-react";
 import { Spinner } from "@/components/ui/spinner";
-import { memo } from "react";
-import {
-  ToolFallbackContent,
-  ToolFallbackRoot,
-  ToolFallbackTrigger,
-} from "./tool-fallback";
-import { CopyBtn, ToolCodeCell } from "./tool-code-cell";
-import { ToolLiveOutput } from "./tool-live-output";
-import { ToolResultOutput } from "./tool-result-output";
-import { useChatRuntimeStore } from "@/features/chat/stores/chat-runtime-store";
+import { getAuthToken } from "@/features/auth/session";
 import {
   preferFullToolOutput,
   useToolAwaitingApproval,
   useToolOutputFor,
   useToolPaneScope,
 } from "@/features/chat";
+import { useChatRuntimeStore } from "@/features/chat/stores/chat-runtime-store";
+import { apiUrl } from "@/lib/api-base";
+import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
+import { useToolArgsStatus } from "@assistant-ui/react";
+import { CodeIcon } from "lucide-react";
+import { memo } from "react";
+import { CopyBtn, ToolCodeCell } from "./tool-code-cell";
+import {
+  ToolFallbackContent,
+  ToolFallbackRoot,
+  ToolFallbackTrigger,
+} from "./tool-fallback";
+import { ToolLiveOutput } from "./tool-live-output";
+import { ToolResultOutput } from "./tool-result-output";
 
 interface StructuredResult {
   text: string;
@@ -130,7 +130,9 @@ const PythonToolUIImpl: ToolCallMessagePartComponent = ({
           ) : displayOutput ? (
             <div className="mt-2 border-t border-dashed pt-2">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-muted-foreground">output</span>
+                <span className="text-xs font-medium text-muted-foreground">
+                  output
+                </span>
                 <CopyBtn text={displayOutput} />
               </div>
               <ToolResultOutput text={displayOutput} />
