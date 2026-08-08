@@ -1,0 +1,61 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 8107 macOS Tauri Repro"
+
+on:
+  push:
+    branches:
+      - "pr-8107-repro-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "macos-15"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+
+      - name: "Select current stable Rust"
+        shell: bash
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version
+          cargo --version
+          cmake --version
+
+      - name: "Audit lockfiles before install"
+        shell: bash
+        run: |
+          python3 scripts/lockfile_supply_chain_audit.py
+
+      - name: "Build frontend prerequisite"
+        shell: bash
+        run: |
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          npm run --prefix studio/frontend build
+
+      - name: "Compile and test macOS Tauri crate"
+        shell: bash
+        run: |
+          cd studio/src-tauri
+          cargo tree --locked -i aws-lc-sys
+          cargo test --locked --no-fail-fast
+          cargo check --locked --all-targets
+
+      - name: "Prove manifest idempotency"
+        shell: bash
+        run: |
+          git diff --exit-code -- studio/src-tauri/Cargo.toml studio/src-tauri/Cargo.lock
+          echo 'PASS: Cargo manifest and lockfile stayed byte-identical'
+
