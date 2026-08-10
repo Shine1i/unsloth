@@ -54,7 +54,7 @@ def test_desktop_display_name_and_compatibility_ids() -> None:
     assert config["identifier"] == "ai.unsloth.studio"
     assert config["plugins"]["deep-link"]["desktop"]["schemes"] == ["unsloth"]
     assert config["plugins"]["updater"]["endpoints"] == [
-        "https://github.com/unslothai/unsloth/releases/latest/download/latest.json"
+        "https://github.com/wasimysaid/unsloth/releases/latest/download/latest.json"
     ]
     assert 'name = "unsloth-studio"' in read(TAURI / "Cargo.toml")
 

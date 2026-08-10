@@ -416,10 +416,6 @@ jobs:
             args: ''
             label: Linux (x64)
             artifact: linux-x64
-          - platform: windows-2022
-            args: ''
-            label: Windows (x64)
-            artifact: windows-x64
 
     name: Build ${{ matrix.label }}
     needs: prepare-version
@@ -1510,8 +1506,6 @@ jobs:
               f'{base_name}-Linux.AppImage',
               f'{base_name}-Linux.AppImage.sig',
               f'{base_name}-Ubuntu.deb',
-              f'{base_name}-Windows.exe',
-              f'{base_name}-Windows.exe.sig',
           }
           actual_names = {path.name for path in files}
           if actual_names != expected_names:
@@ -1678,7 +1672,6 @@ jobs:
               }
 
           linux = entry('.AppImage.sig')
-          windows = entry('.exe.sig')
           notes = pathlib.Path(os.environ['RUNNER_TEMP'], 'desktop-release-notes.md').read_text()
           metadata = {
               'version': os.environ['APP_VERSION'],
@@ -1689,8 +1682,6 @@ jobs:
               'platforms': {
                   'linux-x86_64': linux,
                   'linux-x86_64-appimage': linux,
-                  'windows-x86_64': windows,
-                  'windows-x86_64-nsis': windows,
               },
           }
           output = pathlib.Path(os.environ['RUNNER_TEMP'], 'latest.json')
@@ -1863,7 +1854,6 @@ jobs:
 
           required_families = {
               'linux-x86_64': False,
-              'windows-x86_64': False,
           }
           expected_prefix = f'https://github.com/{os.environ["GITHUB_REPOSITORY"]}/releases/download/{release_tag}/'
           forbidden_fragments = ('/releases/latest/', '/releases/download/desktop-latest/')
