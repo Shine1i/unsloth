@@ -487,7 +487,7 @@ jobs:
           node <<'JS'
           const { readFileSync } = require('node:fs');
 
-          const expected = 'https://github.com/unslothai/unsloth/releases/latest/download/latest.json';
+          const expected = 'https://github.com/wasimysaid/unsloth/releases/latest/download/latest.json';
           const config = JSON.parse(readFileSync('studio/src-tauri/tauri.conf.json', 'utf8'));
           const endpoints = config.plugins?.updater?.endpoints;
           if (!Array.isArray(endpoints) || endpoints.length !== 1) {
