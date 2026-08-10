@@ -1072,13 +1072,20 @@ _assert_studio_owned_or_absent() {
 }
 
 
+_benchmark_mark() {
+    [ "${UNSLOTH_BENCHMARK_TIMINGS:-0}" = "1" ] || return 0
+    printf 'UNSLOTH_BENCHMARK %s %s\n' "$1" "$(date +%s%3N)"
+}
+
+
 _packaged_frontend_available() {
     # install.sh and `unsloth studio update` explicitly set 0 for PyPI installs.
     # Wheel extraction mtimes do not preserve build ordering, so source files can
     # appear newer than the release-built dist even though both came from the
     # same wheel. Trust the packaged artifact when its entry point is present;
     # local/source installs set 1 (or leave the mode unset) and still rebuild.
-    [ "${STUDIO_LOCAL_INSTALL:-}" = "0" ] &&
+    [ "${UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD:-0}" != "1" ] &&
+        [ "${STUDIO_LOCAL_INSTALL:-}" = "0" ] &&
         [ -f "$SCRIPT_DIR/frontend/dist/index.html" ]
 }
 
@@ -1185,6 +1192,8 @@ elif [ "$NODE_SOURCE" = bundled ]; then
     else
         _NODE_PY="python"
     fi
+    _benchmark_mark node_install_start
+
     _NODE_LOG="$(mktemp)"
     set +e
     if _is_verbose; then
@@ -1195,6 +1204,8 @@ elif [ "$NODE_SOURCE" = bundled ]; then
         _NODE_STATUS=$?
     fi
     set -e
+
+    _benchmark_mark node_install_end
     if [ "$_NODE_STATUS" -eq 3 ]; then
         step "node" "install blocked by another active Unsloth install" "$C_ERR"
         sed 's/^/   | /' "$_NODE_LOG" >&2; rm -f "$_NODE_LOG"
@@ -1310,6 +1321,8 @@ _try_bun_install() {
     return 1
 }
 
+_benchmark_mark frontend_deps_start
+
 # Capture install output (bun + npm fallback) so we can detect a registry block.
 _FRONTEND_INSTALL_LOG=$(mktemp)
 _CAPTURE_LOG="$_FRONTEND_INSTALL_LOG"
@@ -1342,7 +1355,12 @@ if [ "$_bun_install_ok" = false ]; then
 fi
 _CAPTURE_LOG=""
 rm -f "$_FRONTEND_INSTALL_LOG"
+
+_benchmark_mark frontend_deps_end
+_benchmark_mark frontend_build_start
 run_quiet "npm run build" npm run build
+
+_benchmark_mark frontend_build_end
 
 _restore_gitignores
 trap - EXIT
@@ -1372,7 +1390,9 @@ if [ -d "$_OXC_DIR" ] && [ "${NODE_SOURCE:-}" != skip ] && command -v npm &>/dev
     # `|| _oxc_install_rc=$?` keeps this off `set -e`'s exit path so the hint branch
     # below is reachable; it also captures the exact exit code.
     _oxc_install_rc=0
+    _benchmark_mark oxc_install_start
     run_quiet_no_exit "npm install (oxc validator runtime)" npm install --no-fund --no-audit --loglevel=error "${_NPM_REGISTRY_ARGS[@]+"${_NPM_REGISTRY_ARGS[@]}"}" || _oxc_install_rc=$?
+    _benchmark_mark oxc_install_end
     _CAPTURE_LOG=""
     if [ "$_oxc_install_rc" -ne 0 ]; then
         _suggest_npm_registry "$_OXC_INSTALL_LOG"

@@ -1,0 +1,181 @@
+name: PR 8326 Live Installer Benchmark
+
+on:
+  push:
+    branches:
+      - pr-8326-frontend-benchmark-repro-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: ${{ matrix.scenario }} live install ${{ matrix.repetition }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [full_build, packaged_skip, no_node_oxc]
+        repetition: [1, 2, 3]
+
+    steps:
+      - name: Check out staged PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Materialize the real PyPI packaged frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf studio/frontend/dist
+          python3 - <<'PY'
+          import json
+          import urllib.request
+          import zipfile
+          from pathlib import Path
+
+          with urllib.request.urlopen("https://pypi.org/pypi/unsloth/json", timeout=30) as response:
+              metadata = json.load(response)
+          version = metadata["info"]["version"]
+          wheel = next(item for item in metadata["releases"][version] if item["packagetype"] == "bdist_wheel")
+          target = Path("/tmp/unsloth-latest.whl")
+          urllib.request.urlretrieve(wheel["url"], target)
+          with zipfile.ZipFile(target) as archive:
+              members = [name for name in archive.namelist() if name.startswith("studio/frontend/dist/")]
+              if "studio/frontend/dist/index.html" not in members:
+                  raise SystemExit("latest PyPI wheel has no packaged frontend index")
+              archive.extractall(".", members)
+          count = sum(path.is_file() for path in Path("studio/frontend/dist").rglob("*"))
+          print(f"PyPI unsloth {version}: extracted {count} packaged frontend files")
+          PY
+
+      - name: Configure live scenario
+        shell: bash
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          set -euo pipefail
+          case "$SCENARIO" in
+            full_build)
+              echo "UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=1" >> "$GITHUB_ENV"
+              ;;
+            packaged_skip)
+              echo "UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=0" >> "$GITHUB_ENV"
+              ;;
+            no_node_oxc)
+              echo "UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=0" >> "$GITHUB_ENV"
+              mv studio/backend/core/data_recipe/oxc-validator \
+                studio/backend/core/data_recipe/oxc-validator.benchmark-disabled
+              ;;
+          esac
+
+          # Force the actual setup script down its isolated-Node path rather than
+          # reusing whichever Node/npm happens to be preinstalled on the runner.
+          mkdir -p "$RUNNER_TEMP/unsuitable-node"
+          cat > "$RUNNER_TEMP/unsuitable-node/node" <<'SH'
+          #!/bin/sh
+          [ "${1:-}" = "-v" ] && { echo v18.0.0; exit 0; }
+          exit 1
+          SH
+          cat > "$RUNNER_TEMP/unsuitable-node/npm" <<'SH'
+          #!/bin/sh
+          [ "${1:-}" = "-v" ] && { echo 9.0.0; exit 0; }
+          exit 1
+          SH
+          chmod +x "$RUNNER_TEMP/unsuitable-node/node" "$RUNNER_TEMP/unsuitable-node/npm"
+          echo "$RUNNER_TEMP/unsuitable-node" >> "$GITHUB_PATH"
+
+      - name: Run actual clean installer end to end
+        shell: bash
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          REPETITION: ${{ matrix.repetition }}
+          UNSLOTH_BENCHMARK_TIMINGS: "1"
+          UNSLOTH_CI_SOURCE_OVERLAY: ${{ github.workspace }}
+          UNSLOTH_NO_TORCH: "1"
+          UNSLOTH_SKIP_AUTOSTART: "1"
+          UNSLOTH_SKIP_ROCM_WSL_SETUP: "1"
+          UNSLOTH_STUDIO_HOME: ${{ runner.temp }}/unsloth-${{ matrix.scenario }}-${{ matrix.repetition }}
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/$SCENARIO-$REPETITION.log"
+          metrics="$RUNNER_TEMP/$SCENARIO-$REPETITION.json"
+          export HOME="$RUNNER_TEMP/home-$SCENARIO-$REPETITION"
+          mkdir -p "$HOME"
+
+          started=$(date +%s%3N)
+          set +e
+          bash "$GITHUB_WORKSPACE/install.sh" --no-torch --python 3.12 --verbose 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          set -e
+          finished=$(date +%s%3N)
+          [ "$status" -eq 0 ] || exit "$status"
+          total_ms=$((finished - started))
+
+          export log metrics total_ms SCENARIO REPETITION
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          markers = {}
+          for line in Path(os.environ["log"]).read_text(encoding="utf-8", errors="replace").splitlines():
+              if line.startswith("UNSLOTH_BENCHMARK "):
+                  _, name, value = line.split()
+                  markers[name] = int(value)
+
+          def duration(name):
+              start = markers.get(f"{name}_start")
+              end = markers.get(f"{name}_end")
+              return 0 if start is None or end is None else end - start
+
+          scenario = os.environ["SCENARIO"]
+          data = {
+              "scenario": scenario,
+              "repetition": int(os.environ["REPETITION"]),
+              "total_ms": int(os.environ["total_ms"]),
+              "node_install_ms": duration("node_install"),
+              "frontend_deps_ms": duration("frontend_deps"),
+              "frontend_build_ms": duration("frontend_build"),
+              "oxc_install_ms": duration("oxc_install"),
+              "markers": markers,
+              "actual_install_sh": True,
+              "pypi_consumer_path_with_source_overlay": True,
+          }
+          required = {
+              "full_build": ["node_install", "frontend_deps", "frontend_build", "oxc_install"],
+              "packaged_skip": ["node_install", "oxc_install"],
+              "no_node_oxc": [],
+          }[scenario]
+          for phase in required:
+              if data[f"{phase}_ms"] <= 0:
+                  raise SystemExit(f"missing live timing markers for {phase}: {markers}")
+          absent = {
+              "packaged_skip": ["frontend_deps", "frontend_build"],
+              "no_node_oxc": ["node_install", "frontend_deps", "frontend_build", "oxc_install"],
+          }.get(scenario, [])
+          for phase in absent:
+              if data[f"{phase}_ms"] != 0:
+                  raise SystemExit(f"unexpected {phase} work in {scenario}: {data}")
+
+          Path(os.environ["metrics"]).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(data, indent=2))
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write(f"## {scenario} live install {data['repetition']}\n\n")
+              handle.write("| Phase | Seconds |\n|---|---:|\n")
+              for key in ("node_install_ms", "frontend_deps_ms", "frontend_build_ms", "oxc_install_ms", "total_ms"):
+                  handle.write(f"| {key.removesuffix('_ms')} | {data[key] / 1000:.3f} |\n")
+          PY
+
+      - name: Upload live installer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: live-installer-${{ matrix.scenario }}-${{ matrix.repetition }}
+          path: |
+            ${{ runner.temp }}/${{ matrix.scenario }}-${{ matrix.repetition }}.json
+            ${{ runner.temp }}/${{ matrix.scenario }}-${{ matrix.repetition }}.log
+          retention-days: 3
+          if-no-files-found: warn
