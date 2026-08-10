@@ -743,6 +743,9 @@ jobs:
         with:
           workspaces: 'studio/src-tauri -> target'
 
+          # Fork-only demo runs consume existing caches but never upload multi-GB replacements.
+          save-if: false
+
       # ── macOS: fail before the build if notarization cannot run ──
       - name: Check Apple notarization credentials
         if: matrix.platform == 'macos-latest'
