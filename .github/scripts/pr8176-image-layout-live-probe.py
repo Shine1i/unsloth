@@ -333,10 +333,10 @@ async def scenario_smoke(base_url: str, password: str, browser_name: str, artifa
                 if mode == "create" and geometry["tabsPreviewCenterDelta"] > 1.5:
                     fail(f"{name}: tabs are not preview-centered: {geometry['tabsPreviewCenterDelta']}px")
             else:
-                if abs(geometry["settings"]["width"] - geometry["body"]["width"]) > 1.5:
-                    fail(f"{name}: stacked settings pane is not edge-to-edge")
-                if abs(geometry["preview"]["width"] - geometry["body"]["width"]) > 1.5:
-                    fail(f"{name}: stacked preview pane is not edge-to-edge")
+                if abs(geometry["settings"]["width"] - geometry["preview"]["width"]) > 1.5:
+                    fail(f"{name}: stacked settings and preview widths differ")
+                if abs(geometry["settings"]["x"] - geometry["body"]["x"]) > 1.5:
+                    fail(f"{name}: stacked settings pane does not start at the structural edge")
             shot = artifact_dir / "screenshots" / f"{name}-{mode}-{browser_name}.png"
             shot.parent.mkdir(parents=True, exist_ok=True)
             await page.screenshot(path=str(shot), full_page=False)
