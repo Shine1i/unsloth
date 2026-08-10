@@ -155,11 +155,11 @@ jobs:
 
           PY
 
-      # studio_version names an existing tag, so the backend pin and the stamp
-      # check have to come from that tag, not a dispatch ref that has moved on.
+      # Fork-only demo builds compile the exact workflow-dispatch commit before the
+      # disposable version tag exists.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ steps.prepare.outputs.studio_version }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Resolve the backend pin from the release tag
@@ -504,12 +504,11 @@ jobs:
         with:
           egress-policy: audit
 
-      # The tag, not the dispatch ref: the release is published before this runs and
-      # main keeps moving, so building the dispatch ref would attach unrelated source
-      # to the release and record a SHA that is not the tag's.
+      # Fork-only demo builds compile the exact workflow-dispatch commit before the
+      # disposable version tag exists.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ needs.prepare-version.outputs.desktop_release_tag }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       # ── Linux dependencies ──
