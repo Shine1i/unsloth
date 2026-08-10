@@ -59,6 +59,10 @@ jobs:
           case "$SCENARIO" in
             full_build)
               echo "UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=1" >> "$GITHUB_ENV"
+
+              # Reproduce wheel extraction ordering: source input newer than
+              # packaged dist, which is what triggered the old rebuild path.
+              find studio/frontend/src -type f -exec touch {} +
               ;;
             packaged_skip)
               echo "UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=0" >> "$GITHUB_ENV"
