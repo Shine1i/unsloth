@@ -1074,7 +1074,8 @@ _assert_studio_owned_or_absent() {
 
 _benchmark_mark() {
     [ "${UNSLOTH_BENCHMARK_TIMINGS:-0}" = "1" ] || return 0
-    printf 'UNSLOTH_BENCHMARK %s %s\n' "$1" "$(date +%s%3N)"
+    _benchmark_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
+    printf 'UNSLOTH_BENCHMARK %s %s\n' "$1" "$_benchmark_ms"
 }
 
 

@@ -3036,12 +3036,21 @@ function Get-NodeDecision {
 }
 
 
+function Write-BenchmarkMark {
+    param([string]$Name)
+    if ($env:UNSLOTH_BENCHMARK_TIMINGS -ne "1") { return }
+    $milliseconds = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    Write-StudioLine "UNSLOTH_BENCHMARK $Name $milliseconds"
+}
+
+
 function Test-PackagedFrontend {
     param([string]$LocalInstall, [string]$IndexPath)
     # install.ps1 and `unsloth studio update` explicitly pass 0 for PyPI
     # installs. Wheel extraction mtimes do not preserve build ordering, so use
     # the release-built dist whenever its entry point is present.
-    return $LocalInstall -eq "0" -and (Test-Path -LiteralPath $IndexPath -PathType Leaf)
+    return $env:UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD -ne "1" -and
+        $LocalInstall -eq "0" -and (Test-Path -LiteralPath $IndexPath -PathType Leaf)
 }
 
 $SkipFrontend = ($env:SKIP_STUDIO_FRONTEND -eq "1")
@@ -3352,7 +3361,9 @@ if ($NeedNodeForSetup) {
         # The main Python resolver runs later; bare `python` may be a Store stub or
         # absent this early, so prefer the validated handed-off/venv Python.
         $NodeInstallPython = if ($ValidatedSetupPython) { $ValidatedSetupPython } else { "python" }
+        Write-BenchmarkMark "node_install_start"
         $nodeOut = & $NodeInstallPython "$PSScriptRoot\install_node_prebuilt.py" --install-dir $NodeDir 2>&1 | Out-String
+        Write-BenchmarkMark "node_install_end"
         $nodeExit = $LASTEXITCODE
         if ($nodeExit -eq 3) {
             Write-StudioLine $nodeOut -ForegroundColor DarkGray
@@ -3435,6 +3446,8 @@ if ($NeedFrontendBuild -and -not $IsPipInstall) {
 
     $UseBun = $null -ne (Get-Command bun -ErrorAction SilentlyContinue)
 
+    Write-BenchmarkMark "frontend_deps_start"
+
     # bun's package cache can become corrupt -- packages get stored with only
     # metadata but no actual content (bin/, lib/). When this happens bun install
     # exits 0 but leaves binaries missing. We validate after install and clear
@@ -3486,8 +3499,13 @@ if ($NeedFrontendBuild -and -not $IsPipInstall) {
         }
     }
 
+    Write-BenchmarkMark "frontend_deps_end"
+    Write-BenchmarkMark "frontend_build_start"
+
     # Always use npm to run the build (Node runtime — avoids bun Windows runtime issues)
     $buildExit = Invoke-SetupCommand { npm run build }
+
+    Write-BenchmarkMark "frontend_build_end"
     if ($buildExit -ne 0) {
         Pop-Location
         $ErrorActionPreference = $prevEAP_npm
@@ -3518,7 +3536,9 @@ if ((Test-Path $OxcValidatorDir) -and $NodeSource -ne "skip" -and (Get-Command n
     $prevEAP_oxc = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     Push-Location $OxcValidatorDir
+    Write-BenchmarkMark "oxc_install_start"
     $oxcInstallExit = Invoke-SetupCommand { npm install @NpmRegistryArgs }
+    Write-BenchmarkMark "oxc_install_end"
     if ($oxcInstallExit -ne 0) {
         Pop-Location
         $ErrorActionPreference = $prevEAP_oxc

@@ -1,0 +1,140 @@
+name: PR 8326 Mac Windows Live Benchmark
+
+on:
+  push:
+    branches: [pr-8326-frontend-benchmark-repro-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.scenario }} ${{ matrix.repetition }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [full_build, packaged_skip, no_node_oxc]
+        repetition: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Materialize real PyPI frontend
+        run: python3 scripts/pr8326_materialize_frontend.py
+      - name: Configure scenario
+        shell: bash
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          set -euo pipefail
+          if [ "$SCENARIO" = full_build ]; then
+            echo 'UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=1' >> "$GITHUB_ENV"
+            find studio/frontend/src -type f -exec touch {} +
+          else
+            echo 'UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=0' >> "$GITHUB_ENV"
+          fi
+          if [ "$SCENARIO" = no_node_oxc ]; then
+            mv studio/backend/core/data_recipe/oxc-validator studio/backend/core/data_recipe/oxc-validator.benchmark-disabled
+          fi
+          mkdir -p "$RUNNER_TEMP/unsuitable-node"
+          printf '#!/bin/sh\n[ "${1:-}" = "-v" ] && { echo v18.0.0; exit 0; }; exit 1\n' > "$RUNNER_TEMP/unsuitable-node/node"
+          printf '#!/bin/sh\n[ "${1:-}" = "-v" ] && { echo 9.0.0; exit 0; }; exit 1\n' > "$RUNNER_TEMP/unsuitable-node/npm"
+          chmod +x "$RUNNER_TEMP/unsuitable-node/node" "$RUNNER_TEMP/unsuitable-node/npm"
+          echo "$RUNNER_TEMP/unsuitable-node" >> "$GITHUB_PATH"
+      - name: Run actual macOS installer
+        shell: bash
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          REPETITION: ${{ matrix.repetition }}
+          OS_LABEL: macos
+          UNSLOTH_BENCHMARK_TIMINGS: '1'
+          UNSLOTH_CI_SOURCE_OVERLAY: ${{ github.workspace }}
+          UNSLOTH_NO_TORCH: '1'
+          UNSLOTH_SKIP_AUTOSTART: '1'
+          UNSLOTH_STUDIO_HOME: ${{ runner.temp }}/unsloth-${{ matrix.scenario }}-${{ matrix.repetition }}
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/home-$SCENARIO-$REPETITION"; mkdir -p "$HOME"
+          BENCH_LOG="$RUNNER_TEMP/macos-$SCENARIO-$REPETITION.log"
+          BENCH_METRICS="$RUNNER_TEMP/macos-$SCENARIO-$REPETITION.json"
+          start=$(python3 -c 'import time; print(time.time_ns()//1000000)')
+          set +e
+          bash install.sh --no-torch --python 3.12 --verbose 2>&1 | tee "$BENCH_LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          end=$(python3 -c 'import time; print(time.time_ns()//1000000)')
+          [ "$status" -eq 0 ] || exit "$status"
+          export BENCH_LOG BENCH_METRICS TOTAL_MS=$((end-start)) SCENARIO REPETITION OS_LABEL
+          python3 scripts/pr8326_parse_benchmark.py
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-${{ matrix.scenario }}-${{ matrix.repetition }}
+          path: ${{ runner.temp }}/macos-${{ matrix.scenario }}-${{ matrix.repetition }}.*
+          retention-days: 3
+
+  windows:
+    name: Windows ${{ matrix.scenario }} ${{ matrix.repetition }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [full_build, packaged_skip, no_node_oxc]
+        repetition: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Materialize real PyPI frontend
+        shell: pwsh
+        run: python scripts/pr8326_materialize_frontend.py
+      - name: Configure scenario
+        shell: pwsh
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          if ($env:SCENARIO -eq 'full_build') {
+            'UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=1' | Out-File $env:GITHUB_ENV -Append
+            Get-ChildItem studio/frontend/src -Recurse -File | ForEach-Object { $_.LastWriteTimeUtc = [DateTime]::UtcNow }
+          } else {
+            'UNSLOTH_BENCHMARK_FORCE_FRONTEND_BUILD=0' | Out-File $env:GITHUB_ENV -Append
+          }
+          if ($env:SCENARIO -eq 'no_node_oxc') {
+            Move-Item studio/backend/core/data_recipe/oxc-validator studio/backend/core/data_recipe/oxc-validator.benchmark-disabled
+          }
+          $fake = Join-Path $env:RUNNER_TEMP 'unsuitable-node'
+          New-Item -ItemType Directory -Force $fake | Out-Null
+          "@echo off`r`nif `"%1`"==`"-v`" (echo v18.0.0& exit /b 0)`r`nexit /b 1" | Set-Content (Join-Path $fake 'node.cmd')
+          "@echo off`r`nif `"%1`"==`"-v`" (echo 9.0.0& exit /b 0)`r`nexit /b 1" | Set-Content (Join-Path $fake 'npm.cmd')
+          $fake | Out-File $env:GITHUB_PATH -Append
+      - name: Run actual Windows installer
+        shell: pwsh
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          REPETITION: ${{ matrix.repetition }}
+          OS_LABEL: windows
+          UNSLOTH_BENCHMARK_TIMINGS: '1'
+          UNSLOTH_CI_SOURCE_OVERLAY: ${{ github.workspace }}
+          UNSLOTH_NO_TORCH: '1'
+          UNSLOTH_SKIP_AUTOSTART: '1'
+          UNSLOTH_PYTHON: '3.12'
+          UNSLOTH_STUDIO_HOME: ${{ runner.temp }}\unsloth-${{ matrix.scenario }}-${{ matrix.repetition }}
+        run: |
+          $env:HOME = Join-Path $env:RUNNER_TEMP "home-$env:SCENARIO-$env:REPETITION"
+          New-Item -ItemType Directory -Force $env:HOME | Out-Null
+          $env:BENCH_LOG = Join-Path $env:RUNNER_TEMP "windows-$env:SCENARIO-$env:REPETITION.log"
+          $env:BENCH_METRICS = Join-Path $env:RUNNER_TEMP "windows-$env:SCENARIO-$env:REPETITION.json"
+          $start = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:GITHUB_WORKSPACE\install.ps1" --no-torch --verbose 2>&1 | Tee-Object -FilePath $env:BENCH_LOG
+          $status = $LASTEXITCODE
+          $end = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+          if ($status -ne 0) { exit $status }
+          $env:TOTAL_MS = [string]($end - $start)
+          python scripts/pr8326_parse_benchmark.py
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-${{ matrix.scenario }}-${{ matrix.repetition }}
+          path: ${{ runner.temp }}/windows-${{ matrix.scenario }}-${{ matrix.repetition }}.*
+          retention-days: 3

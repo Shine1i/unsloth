@@ -1,9 +1,6 @@
 name: PR 8326 Live Installer Benchmark
 
 on:
-  push:
-    branches:
-      - pr-8326-frontend-benchmark-repro-ci
   workflow_dispatch:
 
 permissions:
