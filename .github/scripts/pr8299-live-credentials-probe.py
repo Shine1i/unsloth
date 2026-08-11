@@ -211,7 +211,9 @@ async def save_credentials(
         await studio_page.screenshot(shots / "01_hf_token_saved.png")
 
         await dialog.get_by_role("button", name="Connections", exact=True).click()
-        await dialog.get_by_role("button", name="Add connection", exact=True).click()
+        await dialog.get_by_role(
+            "button", name=re.compile(r"^Add connection")
+        ).click()
         await dialog.locator("#provider-preset").click()
         await page.get_by_role("option", name="OpenAI", exact=True).click()
         await dialog.locator("#provider-api-key").fill(openai_key)
