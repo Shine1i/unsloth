@@ -20,8 +20,7 @@ import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from studio_test_kit.auth import StudioAuth, login, seed_init_script
-from studio_test_kit.flows import multi_turn_chat
-from studio_test_kit.ui import open_chat
+from studio_test_kit.ui import open_chat, send_prompt, wait_for_stream
 
 MODEL = "gpt-4o-mini"
 NEW_PASSWORD = "UnslothStudioLiveCI2026!"
@@ -271,14 +270,22 @@ async def live_chat(
         video_name=label,
         browser_name=os.environ.get("STUDIO_BROWSER", "chromium"),
     ) as studio_page:
-        await multi_turn_chat(
-            studio_page,
-            MODEL,
-            [prompt],
-            artifact_dir / label,
-            settle_timeout_ms=120_000,
-        )
-        await studio_page.screenshot(artifact_dir / f"{label}-final.png")
+        shots = artifact_dir / label
+        shots.mkdir(parents=True, exist_ok=True)
+        await studio_page.screenshot(shots / "01_chat_open.png")
+        trigger = studio_page.page.get_by_role(
+            "button", name=re.compile(r"^\s*Select model\s*$")
+        ).first
+        await trigger.click(timeout=30_000)
+        option = studio_page.page.get_by_role(
+            "option", name=re.compile(rf"^\s*{re.escape(MODEL)}\s*$")
+        ).first
+        await option.click(timeout=30_000)
+        await studio_page.screenshot(shots / "02_model_picked.png")
+        await send_prompt(studio_page, prompt)
+        await studio_page.screenshot(shots / "03_prompt_sent.png")
+        await wait_for_stream(studio_page, timeout_ms=120_000)
+        await studio_page.screenshot(shots / "04_response.png")
         body_text = await studio_page.page.locator("body").inner_text()
         if "error" in body_text.lower() and "connection" in body_text.lower():
             fail("Studio UI displayed a provider connection error")
