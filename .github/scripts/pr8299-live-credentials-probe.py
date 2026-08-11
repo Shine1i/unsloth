@@ -383,8 +383,12 @@ async def live_chat(
             "button", name=re.compile(r"^\s*Select model\s*$")
         ).first
         await trigger.click(timeout=30_000)
+        await studio_page.page.get_by_role(
+            "tab", name="Connected", exact=True
+        ).click(timeout=30_000)
+        await studio_page.screenshot(shots / "02_connected_models.png")
         option = studio_page.page.get_by_role(
-            "option", name=re.compile(rf"^\s*{re.escape(model_id)}\s*$")
+            "button", name=model_id, exact=True
         ).first
         await option.click(timeout=30_000)
         await studio_page.screenshot(shots / "02_model_picked.png")
