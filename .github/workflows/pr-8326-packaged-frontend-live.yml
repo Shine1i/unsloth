@@ -69,8 +69,7 @@ jobs:
           $env:UNSLOTH_SKIP_AUTOSTART = '1'
           & ./install.ps1 --no-torch --verbose *>&1 | Tee-Object "$env:STUDIO_ARTIFACT_DIR/install.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $site = Get-ChildItem "$env:UNSLOTH_STUDIO_HOME/unsloth_studio/Lib/site-packages/studio/frontend/dist" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $site) { $site = Get-Item "$env:UNSLOTH_STUDIO_HOME/unsloth_studio/Lib/site-packages/studio/frontend/dist" }
+          $site = Get-Item "$env:UNSLOTH_STUDIO_HOME/unsloth_studio/Lib/site-packages/studio/frontend/dist"
           $marker = Join-Path $site.FullName 'pr8326-candidate.json'
           if (-not (Test-Path $marker)) { throw "candidate marker missing from installed wheel: $marker" }
           $installed = Get-Content -Raw $marker | ConvertFrom-Json
