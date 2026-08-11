@@ -217,9 +217,16 @@ async def save_credentials(
         await dialog.locator("#provider-preset").click()
         await page.get_by_role("option", name="OpenAI", exact=True).click()
         await dialog.locator("#provider-api-key").fill(openai_key)
-        manual_models = dialog.locator("#provider-manual-models")
-        await manual_models.wait_for(state="visible", timeout=30_000)
-        await manual_models.fill(MODEL)
+        await dialog.get_by_role(
+            "button", name="Load available models", exact=True
+        ).click()
+        model_search = dialog.locator('input[aria-label="Search models"]')
+        await model_search.wait_for(state="visible", timeout=60_000)
+        await model_search.fill(MODEL)
+        model_row = dialog.locator("li").filter(
+            has_text=re.compile(rf"^\s*{re.escape(MODEL)}\s*$")
+        ).first
+        await model_row.click(timeout=30_000)
         await studio_page.screenshot(shots / "02_openai_connection_filled.png")
         await dialog.get_by_role("button", name="Add connection", exact=True).click()
         await dialog.get_by_text(MODEL, exact=True).wait_for(timeout=30_000)
