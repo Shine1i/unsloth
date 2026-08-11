@@ -1,0 +1,142 @@
+# Disposable live Studio repro workflow. Delete after validation.
+
+name: "PR 8326 Packaged Frontend Live"
+
+on:
+  push:
+    branches:
+      - "pr-8326-packaged-frontend-e2e-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-studio:
+    name: "Studio smoke (${{ matrix.os }}, ${{ matrix.browser }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest", "windows-latest", "macos-latest"]
+        browser: ["chromium"]
+    env:
+      UNSLOTH_STUDIO_HOME: ${{ github.workspace }}/.studio-live/home
+      STUDIO_ARTIFACT_DIR: ${{ github.workspace }}/.studio-live/artifacts/${{ matrix.os }}-${{ matrix.browser }}
+      STUDIO_BROWSER: ${{ matrix.browser }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+
+
+      - name: Install Playwright dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "playwright==1.56.0" "httpx>=0.27,<1" "pillow>=10,<13"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python -m playwright install --with-deps "${{ matrix.browser }}"
+          else
+            python -m playwright install "${{ matrix.browser }}"
+          fi
+
+      - name: Build and install release-like candidate wheel (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path $env:UNSLOTH_STUDIO_HOME, $env:STUDIO_ARTIFACT_DIR | Out-Null
+          python -m pip install build
+          $utils = 'unsloth/models/_utils.py'
+          (Get-Content -Raw $utils) -replace '__version__ = "[^"]+"', '__version__ = "2099.8.326"' | Set-Content -Encoding utf8 $utils
+          $markerDir = 'studio/frontend/public'
+          New-Item -ItemType Directory -Force -Path $markerDir | Out-Null
+          @{ candidate_sha = '${{ github.sha }}'; candidate_version = '2099.8.326'; source = 'merged-main-plus-pr-8326' } |
+            ConvertTo-Json -Compress | Set-Content -Encoding utf8 "$markerDir/pr8326-candidate.json"
+          bash ./build.sh
+          $env:UV_FIND_LINKS = (Resolve-Path dist).Path
+          $env:UNSLOTH_PYTHON = '3.12'
+          $env:UNSLOTH_SKIP_AUTOSTART = '1'
+          & ./install.ps1 --no-torch --verbose *>&1 | Tee-Object "$env:STUDIO_ARTIFACT_DIR/install.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $site = Get-ChildItem "$env:UNSLOTH_STUDIO_HOME/unsloth_studio/Lib/site-packages/studio/frontend/dist" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $site) { $site = Get-Item "$env:UNSLOTH_STUDIO_HOME/unsloth_studio/Lib/site-packages/studio/frontend/dist" }
+          $marker = Join-Path $site.FullName 'pr8326-candidate.json'
+          if (-not (Test-Path $marker)) { throw "candidate marker missing from installed wheel: $marker" }
+          $installed = Get-Content -Raw $marker | ConvertFrom-Json
+          if ($installed.candidate_sha -ne '${{ github.sha }}') { throw "wrong frontend SHA: $($installed.candidate_sha)" }
+          $installLog = Get-Content -Raw "$env:STUDIO_ARTIFACT_DIR/install.log"
+          if ($installLog -notmatch 'bundled \(pip install\)') { throw 'packaged frontend skip was not observed during install' }
+          $source = Join-Path $site.Parent.FullName 'package.json'
+          (Get-Item $source).LastWriteTime = (Get-Date).AddMinutes(5)
+          $unsloth = "$env:UNSLOTH_STUDIO_HOME/unsloth_studio/Scripts/unsloth.exe"
+          & $unsloth studio update --no-verify --verbose *>&1 | Tee-Object "$env:STUDIO_ARTIFACT_DIR/web-update.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $webLog = Get-Content -Raw "$env:STUDIO_ARTIFACT_DIR/web-update.log"
+          if ($webLog -notmatch 'bundled \(pip install\)') { throw 'web update did not trust packaged frontend' }
+          $env:UNSLOTH_TAURI_UPDATE = '1'
+          $env:SKIP_STUDIO_FRONTEND = '1'
+          & $unsloth studio update --no-verify --verbose *>&1 | Tee-Object "$env:STUDIO_ARTIFACT_DIR/tauri-update.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tauriLog = Get-Content -Raw "$env:STUDIO_ARTIFACT_DIR/tauri-update.log"
+          if ($tauriLog -notmatch 'bundled \(Tauri\)') { throw 'Tauri update did not use bundled frontend policy' }
+          if ((Get-Content -Raw $marker | ConvertFrom-Json).candidate_sha -ne '${{ github.sha }}') { throw 'candidate frontend changed after updates' }
+          "PASS candidate wheel 2099.8.326 installed, web update skipped rebuild, Tauri update skipped rebuild" | Tee-Object "$env:STUDIO_ARTIFACT_DIR/proof.txt"
+      - name: Build and install release-like candidate wheel (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$UNSLOTH_STUDIO_HOME" "$STUDIO_ARTIFACT_DIR" studio/frontend/public
+          python -m pip install build
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('unsloth/models/_utils.py')
+          path.write_text(re.sub(r'__version__ = "[^"]+"', '__version__ = "2099.8.326"', path.read_text()), encoding='utf-8')
+          PY
+          printf '%s\n' '{"candidate_sha":"${{ github.sha }}","candidate_version":"2099.8.326","source":"merged-main-plus-pr-8326"}' > studio/frontend/public/pr8326-candidate.json
+          bash ./build.sh
+          export UV_FIND_LINKS="$PWD/dist"
+          export UNSLOTH_PYTHON=3.12 UNSLOTH_SKIP_AUTOSTART=1
+          bash ./install.sh --no-torch --verbose 2>&1 | tee "$STUDIO_ARTIFACT_DIR/install.log"
+          SITE_DIST=$(find "$UNSLOTH_STUDIO_HOME/unsloth_studio" -path '*/site-packages/studio/frontend/dist' -type d -print -quit)
+          test -n "$SITE_DIST" && test -f "$SITE_DIST/pr8326-candidate.json"
+          python - "$SITE_DIST/pr8326-candidate.json" '${{ github.sha }}' <<'PY'
+          import json, sys
+          assert json.load(open(sys.argv[1], encoding='utf-8'))['candidate_sha'] == sys.argv[2]
+          PY
+          grep -q 'bundled (pip install)' "$STUDIO_ARTIFACT_DIR/install.log"
+          touch -m -d '+5 minutes' "$SITE_DIST/../package.json" 2>/dev/null || touch "$SITE_DIST/../package.json"
+          UNSLOTH="$UNSLOTH_STUDIO_HOME/unsloth_studio/bin/unsloth"
+          "$UNSLOTH" studio update --no-verify --verbose 2>&1 | tee "$STUDIO_ARTIFACT_DIR/web-update.log"
+          grep -q 'bundled (pip install)' "$STUDIO_ARTIFACT_DIR/web-update.log"
+          UNSLOTH_TAURI_UPDATE=1 SKIP_STUDIO_FRONTEND=1 "$UNSLOTH" studio update --no-verify --verbose 2>&1 | tee "$STUDIO_ARTIFACT_DIR/tauri-update.log"
+          grep -q 'bundled (Tauri)' "$STUDIO_ARTIFACT_DIR/tauri-update.log"
+          python - "$SITE_DIST/pr8326-candidate.json" '${{ github.sha }}' <<'PY'
+          import json, sys
+          assert json.load(open(sys.argv[1], encoding='utf-8'))['candidate_sha'] == sys.argv[2]
+          PY
+          printf '%s\n' 'PASS candidate wheel 2099.8.326 installed, web update skipped rebuild, Tauri update skipped rebuild' | tee "$STUDIO_ARTIFACT_DIR/proof.txt"
+      - name: Launch Studio and run Playwright probe
+        shell: bash
+        run: |
+          python ".github/scripts/pr-8326-packaged-frontend-live-probe.py"
+
+      - name: Upload Studio probe artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: studio-smoke-${{ matrix.os }}-${{ matrix.browser }}
+          path: ${{ github.workspace }}/.studio-live/artifacts
+          if-no-files-found: warn
