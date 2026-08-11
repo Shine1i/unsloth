@@ -19,7 +19,7 @@ from pathlib import Path
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from studio_test_kit.auth import StudioAuth, login, seed_init_script
+from studio_test_kit.auth import ProviderSeed, StudioAuth, login, seed_init_script
 from studio_test_kit.ui import open_chat, send_prompt, wait_for_stream
 
 MODEL = "gpt-4o-mini"
@@ -174,44 +174,77 @@ def encrypt_provider_key(public_key_pem: str, plaintext: str) -> str:
     return base64.b64encode(encrypted).decode("ascii")
 
 
-async def save_credentials(base_url: str, auth: StudioAuth, hf_token: str, openai_key: str) -> str:
-    async with httpx.AsyncClient(timeout=60) as client:
-        hf_response = await client.put(
-            f"{base_url}/api/settings/hugging-face-token",
-            headers={**bearer(auth), "Content-Type": "application/json"},
-            json={"token": hf_token},
+async def save_credentials(
+    base_url: str,
+    auth: StudioAuth,
+    hf_token: str,
+    openai_key: str,
+    artifact_dir: Path,
+) -> str:
+    """Drive the real Settings UI to save both credentials."""
+    init_script = seed_init_script(
+        auth,
+        [],
+        connections_enabled=True,
+        extra_local_storage={"unsloth_onboarding_done": "true"},
+    )
+    shots = artifact_dir / "settings-ui"
+    shots.mkdir(parents=True, exist_ok=True)
+    async with open_chat(
+        base_url,
+        init_scripts=[init_script],
+        video_dir=artifact_dir / "video",
+        video_name="settings-credential-entry",
+        browser_name=os.environ.get("STUDIO_BROWSER", "chromium"),
+    ) as studio_page:
+        page = studio_page.page
+        profile = page.locator("button").filter(has_text="Unsloth").last
+        await profile.click(timeout=30_000)
+        await page.get_by_role("menuitem", name=re.compile(r"^Settings")).click()
+        dialog = page.get_by_role("dialog")
+        await dialog.wait_for(state="visible", timeout=30_000)
+
+        hf_input = dialog.locator('input[name="hf-token"]')
+        await hf_input.fill(hf_token)
+        await hf_input.press("Tab")
+        await page.wait_for_timeout(1_500)
+        await studio_page.screenshot(shots / "01_hf_token_saved.png")
+
+        await dialog.get_by_role("button", name="Connections", exact=True).click()
+        await dialog.get_by_role("button", name="Add connection", exact=True).click()
+        await dialog.locator("#provider-preset").click()
+        await page.get_by_role("option", name="OpenAI", exact=True).click()
+        await dialog.locator("#provider-api-key").fill(openai_key)
+        manual_models = dialog.locator("#provider-manual-models")
+        await manual_models.wait_for(state="visible", timeout=30_000)
+        await manual_models.fill(MODEL)
+        await studio_page.screenshot(shots / "02_openai_connection_filled.png")
+        await dialog.get_by_role("button", name="Add connection", exact=True).click()
+        await dialog.get_by_text(MODEL, exact=True).wait_for(timeout=30_000)
+        await studio_page.screenshot(shots / "03_openai_connection_saved.png")
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        hf_response = await client.get(
+            f"{base_url}/api/settings/hugging-face-token", headers=bearer(auth)
         )
         hf_response.raise_for_status()
-        if hf_response.json().get("has_token") is not True:
-            fail("HF token endpoint did not confirm persistence")
-
-        public_key_response = await client.get(
-            f"{base_url}/api/providers/public-key", headers=bearer(auth)
+        if hf_response.json().get("token") != hf_token:
+            fail("Settings UI did not persist the Hugging Face token")
+        providers_response = await client.get(
+            f"{base_url}/api/providers/", headers=bearer(auth)
         )
-        public_key_response.raise_for_status()
-        encrypted_key = encrypt_provider_key(
-            public_key_response.json()["public_key"], openai_key
-        )
-        provider_response = await client.post(
-            f"{base_url}/api/providers/",
-            headers={**bearer(auth), "Content-Type": "application/json"},
-            json={
-                "provider_type": "openai",
-                "display_name": "OpenAI Live CI",
-                "base_url": "https://api.openai.com/v1",
-                "models": [MODEL],
-                "available_models": [MODEL],
-                "encrypted_api_key": encrypted_key,
-            },
-        )
-        provider_response.raise_for_status()
-        provider = provider_response.json()
-    if provider.get("has_api_key") is not True:
-        fail("provider create response did not report a saved key")
+        providers_response.raise_for_status()
+        providers = providers_response.json()
+    provider = next(
+        (item for item in providers if item.get("provider_type") == "openai"),
+        None,
+    )
+    if not provider or provider.get("has_api_key") is not True:
+        fail("Settings UI did not persist the OpenAI connection and key")
     serialized = json.dumps(provider)
     if openai_key in serialized or "encrypted_api_key" in provider or "api_key" in provider:
         fail("provider response exposed credential material")
-    passed("HF token and OpenAI connection were saved through Studio APIs")
+    passed("HF token and OpenAI connection were saved through the live Settings UI")
     return str(provider["id"])
 
 
@@ -253,13 +286,24 @@ async def verify_saved_credentials(
 async def live_chat(
     base_url: str,
     auth: StudioAuth,
+
+    provider_id: str,
     artifact_dir: Path,
     label: str,
     prompt: str,
 ) -> None:
     init_script = seed_init_script(
         auth,
-        [],
+        [
+            ProviderSeed(
+                provider_type="openai",
+                name="OpenAI Live CI",
+                base_url="https://api.openai.com/v1",
+                models=[MODEL],
+                api_key="",
+                id=provider_id,
+            )
+        ],
         connections_enabled=True,
         extra_local_storage={"unsloth_onboarding_done": "true"},
     )
@@ -333,11 +377,15 @@ async def main() -> None:
         if not bootstrap:
             fail("could not obtain Studio bootstrap password")
         auth, password = await authenticate(first_base, bootstrap)
-        provider_id = await save_credentials(first_base, auth, hf_token, openai_key)
+        provider_id = await save_credentials(
+            first_base, auth, hf_token, openai_key, artifact_dir
+        )
         await verify_hf_live(hf_token)
         await live_chat(
             first_base,
             auth,
+
+            provider_id,
             artifact_dir,
             "before-restart",
             "Reply with exactly: credential persistence live check passed.",
@@ -357,6 +405,8 @@ async def main() -> None:
         await live_chat(
             second_base,
             auth,
+
+            provider_id,
             artifact_dir,
             "after-restart",
             "Reply with exactly: saved provider survived restart.",
