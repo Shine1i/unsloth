@@ -180,7 +180,7 @@ async def save_credentials(
     hf_token: str,
     openai_key: str,
     artifact_dir: Path,
-) -> str:
+) -> tuple[str, str]:
     """Drive the real Settings UI to save both credentials."""
     init_script = seed_init_script(
         auth,
@@ -222,14 +222,65 @@ async def save_credentials(
         ).click()
         model_search = dialog.locator('input[aria-label="Search models"]')
         await model_search.wait_for(state="visible", timeout=60_000)
-        await model_search.fill(MODEL)
+        await page.wait_for_timeout(500)
+        available_models = [
+            text.strip()
+            for text in await dialog.locator("li").all_inner_texts()
+            if text.strip()
+        ]
+        (shots / "openai-models.json").write_text(
+            json.dumps(available_models, indent=2), encoding="utf-8"
+        )
+        preferred_models = (
+            "gpt-5.4-mini",
+            "gpt-5-mini",
+            "gpt-4.1-mini",
+            "gpt-4o-mini",
+            "gpt-5.4",
+            "gpt-5.2",
+            "gpt-4.1",
+            "gpt-4o",
+        )
+        selected_model = next(
+            (
+                model
+                for preferred in preferred_models
+                for model in available_models
+                if model == preferred or model.startswith(f"{preferred}-")
+            ),
+            None,
+        )
+        if selected_model is None:
+            excluded = (
+                "audio",
+                "realtime",
+                "transcribe",
+                "tts",
+                "image",
+                "search",
+                "embedding",
+                "moderation",
+                "codex",
+            )
+            selected_model = next(
+                (
+                    model
+                    for model in available_models
+                    if model.startswith(("gpt-5", "gpt-4"))
+                    and not any(term in model.lower() for term in excluded)
+                ),
+                None,
+            )
+        if selected_model is None:
+            fail(f"No text-chat OpenAI model was available: {available_models[:20]}")
+        await model_search.fill(selected_model)
         model_row = dialog.locator("li").filter(
-            has_text=re.compile(rf"^\s*{re.escape(MODEL)}\s*$")
+            has_text=re.compile(rf"^\s*{re.escape(selected_model)}\s*$")
         ).first
         await model_row.click(timeout=30_000)
         await studio_page.screenshot(shots / "02_openai_connection_filled.png")
         await dialog.get_by_role("button", name="Add connection", exact=True).click()
-        await dialog.get_by_text(MODEL, exact=True).wait_for(timeout=30_000)
+        await dialog.get_by_text(selected_model, exact=True).wait_for(timeout=30_000)
         await studio_page.screenshot(shots / "03_openai_connection_saved.png")
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -254,7 +305,7 @@ async def save_credentials(
     if openai_key in serialized or "encrypted_api_key" in provider or "api_key" in provider:
         fail("provider response exposed credential material")
     passed("HF token and OpenAI connection were saved through the live Settings UI")
-    return str(provider["id"])
+    return str(provider["id"]), selected_model
 
 
 async def verify_hf_live(hf_token: str) -> None:
@@ -297,6 +348,8 @@ async def live_chat(
     auth: StudioAuth,
 
     provider_id: str,
+
+    model_id: str,
     artifact_dir: Path,
     label: str,
     prompt: str,
@@ -308,7 +361,7 @@ async def live_chat(
                 provider_type="openai",
                 name="OpenAI Live CI",
                 base_url="https://api.openai.com/v1",
-                models=[MODEL],
+                models=[model_id],
                 api_key="",
                 id=provider_id,
             )
@@ -331,7 +384,7 @@ async def live_chat(
         ).first
         await trigger.click(timeout=30_000)
         option = studio_page.page.get_by_role(
-            "option", name=re.compile(rf"^\s*{re.escape(MODEL)}\s*$")
+            "option", name=re.compile(rf"^\s*{re.escape(model_id)}\s*$")
         ).first
         await option.click(timeout=30_000)
         await studio_page.screenshot(shots / "02_model_picked.png")
@@ -386,7 +439,7 @@ async def main() -> None:
         if not bootstrap:
             fail("could not obtain Studio bootstrap password")
         auth, password = await authenticate(first_base, bootstrap)
-        provider_id = await save_credentials(
+        provider_id, model_id = await save_credentials(
             first_base, auth, hf_token, openai_key, artifact_dir
         )
         await verify_hf_live(hf_token)
@@ -395,6 +448,8 @@ async def main() -> None:
             auth,
 
             provider_id,
+
+            model_id,
             artifact_dir,
             "before-restart",
             "Reply with exactly: credential persistence live check passed.",
@@ -416,6 +471,8 @@ async def main() -> None:
             auth,
 
             provider_id,
+
+            model_id,
             artifact_dir,
             "after-restart",
             "Reply with exactly: saved provider survived restart.",
