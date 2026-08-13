@@ -499,17 +499,8 @@ jobs:
       # artifacts, and publish-release does every release mutation once.
       matrix:
         include:
-          - platform: macos-latest
-            args: '--target aarch64-apple-darwin'
-            label: macOS (Apple Silicon)
-            artifact: macos-aarch64
-          # - platform: macos-latest
-          #   args: '--target x86_64-apple-darwin'
-          #   label: macOS (Intel)
-          - platform: ubuntu-22.04
-            args: ''
-            label: Linux (x64)
-            artifact: linux-x64
+          # Fork-only bundle verification: build the Windows NSIS artifacts from
+          # this combined branch without spending runners on unrelated platforms.
           - platform: windows-latest
             args: ''
             label: Windows (x64)
@@ -1621,6 +1612,10 @@ jobs:
   # Draft runs stop after uploading immutable assets; publishing the reviewed draft
   # is validated by publish-desktop-updater.yml without rebuilding.
   publish-release:
+
+    # This disposable fork run validates and retains the Windows build artifact;
+    # it must not mutate a GitHub release or wait for omitted matrix legs.
+    if: ${{ false }}
     name: Publish desktop release
     # Only prepare-version, so this starts alongside the build matrix and
     # queues for its runner during the build instead of after it. "Wait for the

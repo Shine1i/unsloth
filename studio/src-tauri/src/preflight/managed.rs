@@ -327,7 +327,7 @@ async fn run_cli_probe(bin: &Path, args: &[&str]) -> Result<bool, String> {
             "Managed preflight probe {:?} has no managed interpreter to run",
             args
         );
-        return false;
+        return Ok(false);
     };
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
@@ -391,7 +391,7 @@ async fn probe_cli_capability(bin: &Path) -> Result<Option<DesktopCapability>, S
         &["studio", "desktop-capabilities", "--json"],
     ) else {
         info!("Managed desktop-capabilities probe has no managed interpreter to run");
-        return None;
+        return Ok(None);
     };
     cmd.stdout(Stdio::piped()).stderr(Stdio::null());
 
