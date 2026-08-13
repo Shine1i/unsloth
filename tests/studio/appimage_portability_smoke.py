@@ -225,11 +225,19 @@ def main() -> None:
         env["GDK_BACKEND"] = "wayland"
         env["WAYLAND_DISPLAY"] = "wayland-ci"
         weston_log = (art_dir / "weston.log").open("wb")
+
+        weston_help = subprocess.run(
+            ["weston", "--help"], capture_output=True, check=False, text=True
+        )
+        help_text = weston_help.stdout + weston_help.stderr
+        software_renderer = (
+            "--renderer=pixman" if "--renderer" in help_text else "--use-pixman"
+        )
         weston = subprocess.Popen(
             [
                 "weston",
                 "--backend=headless-backend.so",
-                "--renderer=pixman",
+                software_renderer,
                 "--socket=wayland-ci",
                 "--idle-time=0",
             ],

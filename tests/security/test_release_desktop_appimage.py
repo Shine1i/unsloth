@@ -159,6 +159,8 @@ def test_release_preseeds_every_tauri_appimage_tool_with_a_digest():
         assert host_library in tool_script
     assert "GIO_MODULE_DIR" in tool_script
 
+    assert "sed -i '/export GDK_BACKEND=x11/d'" in tool_script
+
 
 def _fake_complete_appdir(tmp_path: Path) -> Path:
     appdir = tmp_path / "AppDir"
@@ -167,10 +169,15 @@ def _fake_complete_appdir(tmp_path: Path) -> Path:
     shutil.copy2("/bin/true", binary)
     apprun = appdir / "AppRun"
     apprun.write_text(
-        '#!/bin/sh\nexport GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"\nexit 0\n',
+        '#!/bin/sh\n. "$APPDIR/apprun-hooks/linuxdeploy-plugin-gtk.sh"\nexit 0\n',
         encoding = "utf-8",
     )
     apprun.chmod(0o755)
+    hook = appdir / "apprun-hooks/linuxdeploy-plugin-gtk.sh"
+    hook.parent.mkdir()
+    hook.write_text(
+        'export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"\n', encoding = "utf-8"
+    )
     runtime = appdir / "usr/lib"
     runtime.mkdir(parents = True)
     for name in (

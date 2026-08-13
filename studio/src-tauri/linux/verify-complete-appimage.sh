@@ -29,7 +29,8 @@ fi
 [[ -d "$appdir" ]] || { echo "AppDir does not exist: $appdir" >&2; exit 1; }
 [[ -x "$appdir/AppRun" ]] || { echo "Complete AppImage has no executable AppRun" >&2; exit 1; }
 
-if ! grep -Rqs 'GIO_MODULE_DIR=' "$appdir/AppRun" "$appdir/usr/lib"; then
+if ! grep -Rqs 'GIO_MODULE_DIR=' \
+  "$appdir/AppRun" "$appdir/apprun-hooks" "$appdir/usr/lib" 2>/dev/null; then
   echo "Complete AppImage does not isolate bundled GIO modules" >&2
   exit 1
 fi

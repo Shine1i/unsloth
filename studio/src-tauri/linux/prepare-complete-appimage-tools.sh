@@ -37,6 +37,12 @@ fetch "$GTK_PLUGIN_URL" "$GTK_PLUGIN_SHA256" linuxdeploy-plugin-gtk.sh
 fetch "$GSTREAMER_PLUGIN_URL" "$GSTREAMER_PLUGIN_SHA256" linuxdeploy-plugin-gstreamer.sh
 fetch "$APPIMAGE_PLUGIN_URL" "$APPIMAGE_PLUGIN_SHA256" linuxdeploy-plugin-appimage.AppImage
 
+
+# The pinned GTK plugin predates the repaired Wayland runtime boundary and
+# unconditionally forces X11. Let GTK follow the session (or an explicit
+# GDK_BACKEND) so the same artifact can run natively on Wayland and under X11.
+sed -i '/export GDK_BACKEND=x11/d' "$tools_dir/linuxdeploy-plugin-gtk.sh"
+
 # Keep host-loaded display, networking, and C++ libraries on the host side of
 # the ABI boundary. Ubuntu 22.04 copies of these break Ubuntu 24.04/Mint 22 GIO,
 # curl, and Mesa modules when the host loads them after bundled WebKitGTK.
