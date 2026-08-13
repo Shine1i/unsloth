@@ -411,7 +411,7 @@ jobs:
           else
             sudo apt-get install -y -qq --no-install-recommends \
               libfuse2 libgles2 libgl1 libegl1 libgbm1 libwayland-client0 \
-              libharfbuzz0b fontconfig libfribidi0
+              libharfbuzz0b libnghttp2-14 fontconfig libfribidi0
             chmod +x dl/*.AppImage
             BIN="$(ls dl/*.AppImage | head -1)"
           fi
@@ -446,13 +446,10 @@ jobs:
           # The launch step below only proves the process stayed alive: on a fresh home
           # preflight reports not_installed and the app waits for a click on the install
           # screen (use-tauri-backend.ts:252-254, startup-screen.tsx:388-389), so a bundle
-          # with a missing or broken install.sh passed both Linux rows. tauri.linux.conf.json
+          # with a missing or broken install.sh passed both Linux rows. tauri.conf.json:56-59
           # ships it as a bundle resource, so find it there and run it as install.rs does.
           if [ "${{ matrix.kind }}" = "deb" ]; then
-            # `|| true`: grep exits 1 when it selects nothing, and under the `set -o pipefail`
-            # above plus this step's `bash -e` that aborts the assignment outright, swallowing
-            # the explicit annotation below in favour of a bare exit 1.
-            SH="$(dpkg -L "$(dpkg-deb -f dl/*.deb Package)" | grep -E '/install\.sh$' | head -1 || true)"
+            SH="$(dpkg -L "$(dpkg-deb -f dl/*.deb Package)" | grep -E '/install\.sh$' | head -1)"
           else
             # ls returns a bare filename here, and a command word with no slash resolves
             # through PATH, not the cwd, so this needs the ./ prefix.
@@ -673,7 +670,7 @@ jobs:
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
               ca-certificates python3 xvfb xauth binutils libgles2 libgl1 libegl1 libgbm1 \
-              libwayland-client0 libharfbuzz0b fontconfig libfribidi0
+              libwayland-client0 libharfbuzz0b libnghttp2-14 fontconfig libfribidi0
             if [[ "${{ matrix.display_backend }}" == "wayland" ]]; then
               DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends weston
             fi
@@ -682,7 +679,7 @@ jobs:
           else
             dnf install -y -q ca-certificates python3 binutils xorg-x11-server-Xvfb xorg-x11-xauth \
               mesa-libGLES mesa-libEGL mesa-libgbm mesa-dri-drivers mesa-libGL \
-              wayland-libs harfbuzz fontconfig fribidi procps-ng findutils
+              libwayland-client libnghttp2 harfbuzz fontconfig fribidi procps-ng findutils
             forbidden="$(rpm -qa | grep -Ei 'webkit|javascriptcore|appindicator|gtk3' || true)"
           fi
           if [ -n "$forbidden" ]; then
@@ -807,7 +804,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             python3 xvfb xauth webkit2gtk-driver libgles2 libgl1 libegl1 libgbm1 \
-            libwayland-client0 libharfbuzz0b fontconfig libfribidi0
+            libwayland-client0 libharfbuzz0b libnghttp2-14 fontconfig libfribidi0
           cargo install tauri-driver --version 2.0.6 --locked
 
       - name: Download the AppImage built from this PR

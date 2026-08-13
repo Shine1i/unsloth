@@ -107,6 +107,7 @@ def test_debian_portability_lanes_install_verifier_and_host_runtime_prerequisite
         "libgbm1",
         "libwayland-client0",
         "libharfbuzz0b",
+        "libnghttp2-14",
     ):
         assert package in source
     assert "weston" in source
@@ -115,9 +116,18 @@ def test_debian_portability_lanes_install_verifier_and_host_runtime_prerequisite
 
     linux_source = yaml.safe_dump(workflow["jobs"]["linux"])
     webdriver_source = yaml.safe_dump(workflow["jobs"]["appimage-model-download"])
-    for package in ("libegl1", "libgbm1", "libwayland-client0", "libharfbuzz0b"):
+    for package in (
+        "libegl1",
+        "libgbm1",
+        "libwayland-client0",
+        "libharfbuzz0b",
+        "libnghttp2-14",
+    ):
         assert package in linux_source
         assert package in webdriver_source
+
+    for package in ("libwayland-client", "libnghttp2"):
+        assert package in source
 
 
 def test_release_preseeds_every_tauri_appimage_tool_with_a_digest():
