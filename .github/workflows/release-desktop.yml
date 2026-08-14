@@ -2,17 +2,18 @@ name: Release Desktop App
 
 on:
   workflow_dispatch:
-    # Both version inputs are free text in the dispatch UI, and studio_version
-    # alone decides the release tag, all nine asset filenames and the updater
-    # manifest version together. Near-miss tags are the failure mode worth
-    # guarding, because they look right at a glance:
+    # The version inputs are free text in the dispatch UI. studio_version alone
+    # decides the release tag, all nine asset filenames and the updater manifest
+    # version. Near-miss tags are the failure mode worth guarding, because they
+    # look right at a glance:
     #
-    #   studio_version   v0.1.52-beta     correct
-    #                    v.0.1.52-beta    rejected: stray dot after the leading v
-    #                    0.1.52-beta      rejected: missing leading v
-    #                    2026.8.3         rejected: that is the PyPI version
+    #   studio_version        v0.1.52-beta     correct
+    #                         v.0.1.52-beta    rejected: stray dot after the leading v
+    #                         0.1.52-beta      rejected: missing leading v
+    #                         2026.8.3         rejected: that is the PyPI version
     #
-    #   pypi_version     2026.8.3         correct, no leading v
+    #   pypi_version          2026.8.3         correct, no leading v
+    #   pypi_studio_version   v0.1.52-beta     optional PyPI artifact stamp
     #
     # "Validate release versions" below rejects each of those by name before any
     # binary is built. Keep the examples here, in the descriptions, and in that
@@ -24,6 +25,11 @@ on:
         required: true
       pypi_version:
         description: 'Exact PyPI unsloth version just published/stamped, no leading v (for example, 2026.8.3); leave blank to use MIN_DESKTOP_BACKEND_VERSION'
+        type: string
+        required: false
+
+      pypi_studio_version:
+        description: 'Exact Unsloth SemVer stamped in the PyPI artifacts (for example, v0.1.52-beta); leave blank to require studio_version'
         type: string
         required: false
       draft:
@@ -84,6 +90,7 @@ jobs:
         shell: bash
         env:
           INPUT_STUDIO_VERSION: ${{ inputs.studio_version }}
+          INPUT_PYPI_STUDIO_VERSION: ${{ inputs.pypi_studio_version }}
           # Reading releases unauthenticated spends a quota shared by every runner.
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -124,6 +131,25 @@ jobs:
               sys.exit(f'studio_version must start with v, for example v{studio_version}')
           if not semver_tag.fullmatch(studio_version):
               sys.exit(f'studio_version must be a SemVer tag with leading v, for example v0.1.52-beta: {studio_version}')
+
+          pypi_studio_version = (
+              os.environ.get('INPUT_PYPI_STUDIO_VERSION', '').strip() or studio_version
+          )
+          if semver_tag.fullmatch(f'v{pypi_studio_version}'):
+              sys.exit(
+                  'pypi_studio_version must start with v, for example '
+                  f'v{pypi_studio_version}'
+              )
+          if not semver_tag.fullmatch(pypi_studio_version):
+              sys.exit(
+                  'pypi_studio_version must be a SemVer tag with leading v, for example '
+                  f'v0.1.52-beta: {pypi_studio_version}'
+              )
+          if pypi_studio_version != studio_version:
+              print(
+                  f'::notice::validating PyPI stamp {pypi_studio_version} for '
+                  f'desktop release {studio_version}'
+              )
 
           app_version = studio_version.removeprefix('v')
           asset_version = re.sub(r'[^0-9A-Za-z]+', '_', app_version).strip('_')
@@ -188,14 +214,16 @@ jobs:
 
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               print(f'studio_version={studio_version}', file=output)
+              print(f'pypi_studio_version={pypi_studio_version}', file=output)
               print(f'app_version={app_version}', file=output)
               print(f'asset_version={asset_version}', file=output)
               print(f'desktop_release_tag={desktop_release_tag}', file=output)
 
           PY
 
-      # studio_version names an existing tag, so the backend pin and the stamp
-      # check have to come from that tag, not a dispatch ref that has moved on.
+      # studio_version names an existing tag, so the backend pin comes from that
+      # tag, not a dispatch ref that has moved on. The separately validated PyPI
+      # stamp version only declares what the downloaded artifacts must contain.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ steps.prepare.outputs.studio_version }}
@@ -340,7 +368,7 @@ jobs:
       - name: Verify PyPI package and Unsloth stamp
         shell: bash
         env:
-          STUDIO_VERSION: ${{ steps.prepare.outputs.studio_version }}
+          PYPI_STUDIO_VERSION: ${{ steps.prepare.outputs.pypi_studio_version }}
           PYPI_VERSION: ${{ steps.prepare.outputs.pypi_version }}
         run: |
           set -euo pipefail
@@ -402,7 +430,7 @@ jobs:
               echo "No PyPI wheel/sdist artifacts downloaded for unsloth==$PYPI_VERSION" >&2
               exit 1
             fi
-            python3 scripts/stamp_studio_release.py --verify-dist "$RUNNER_TEMP/pypi-unsloth-dist" --expected "$STUDIO_VERSION"
+            python3 scripts/stamp_studio_release.py --verify-dist "$RUNNER_TEMP/pypi-unsloth-dist" --expected "$PYPI_STUDIO_VERSION"
           else
             echo "scripts/stamp_studio_release.py not found; release-desktop requires #5308 to verify the PyPI Unsloth stamp." >&2
             exit 1

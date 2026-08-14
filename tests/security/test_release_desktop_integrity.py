@@ -440,6 +440,40 @@ def test_the_tag_is_validated_before_it_is_checked_out(tmp_path):
         assert expected in result.stderr, (bad, result.stderr)
 
 
+def test_a_declared_pypi_stamp_alias_is_validated_and_used(tmp_path):
+    workflow = _workflow()
+    triggers = workflow.get("on", workflow.get(True))
+    stamp_input = triggers["workflow_dispatch"]["inputs"]["pypi_studio_version"]
+    assert stamp_input["required"] is False
+    assert "leave blank" in stamp_input["description"]
+
+    validate = _step(workflow, "prepare-version", "Validate release versions")
+    assert validate["env"]["INPUT_PYPI_STUDIO_VERSION"] == (
+        "${{ inputs.pypi_studio_version }}"
+    )
+    assert "pypi_studio_version=" in validate["run"]
+
+    stamp = _step(workflow, "prepare-version", "Verify PyPI package and Unsloth stamp")
+    assert stamp["env"]["PYPI_STUDIO_VERSION"] == (
+        "${{ steps.prepare.outputs.pypi_studio_version }}"
+    )
+    assert '--expected "$PYPI_STUDIO_VERSION"' in stamp["run"]
+    assert '--expected "$STUDIO_VERSION"' not in stamp["run"]
+
+    result, _ = _run_step(
+        workflow,
+        "prepare-version",
+        "Validate release versions",
+        tmp_path,
+        extra_env = {
+            "INPUT_STUDIO_VERSION": "v0.1.703-beta",
+            "INPUT_PYPI_STUDIO_VERSION": "0.1.71-beta",
+        },
+    )
+    assert result.returncode == 1
+    assert "pypi_studio_version must start with v" in result.stderr
+
+
 def test_the_promotion_guard_orders_numbered_prereleases_by_number():
     guard = _step(_workflow(), "publish-release", "Promote normal release to GitHub latest")["run"]
     body = guard.split('python3 - "$latest_before"', 1)[1].split("\nPY", 1)[0]
