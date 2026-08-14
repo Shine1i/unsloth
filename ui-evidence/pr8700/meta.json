@@ -1,0 +1,52 @@
+{
+  "pr": 8700,
+  "head_ref": "live-prompt-speed",
+  "base_sha": "99bcfd3d93cb4b156227df7b75f4f41aa11106e9",
+  "head_sha": "049016b97675c5f1efb94e4b4be2e8e26f774c92",
+  "scene": "api_monitor_throughput",
+  "expect": "with the same deterministic request carrying prompt_tok_per_sec=2048.4 and tok_per_sec=64.2, BEFORE shows only 'Speed 64.2 tok/s'; AFTER replaces it with separate 'Prompt speed 2048 tok/s' and 'Generation speed 64.2 tok/s' metrics, so prefill and decode throughput are both visible without conflation",
+  "facts": {
+    "BEFORE": {
+      "fixture_prompt_tok_per_sec": 2048.4,
+      "fixture_generation_tok_per_sec": 64.2,
+      "rendered_metrics": {
+        "STARTED": "01:33:20",
+        "DURATION": "2.0 s",
+        "PROMPT TOKENS": "1 024",
+        "COMPLETION TOKENS": "64",
+        "TOTAL TOKENS": "1 088",
+        "CONTEXT": "32 768",
+        "FIRST TOKEN": "1.0 s",
+        "GENERATING": "1.0 s",
+        "SPEED": "64.2 tok/s",
+        "STOP REASON": "stop"
+      },
+      "has_prompt_speed": false,
+      "has_generation_speed": false,
+      "has_legacy_speed": true
+    },
+    "AFTER": {
+      "fixture_prompt_tok_per_sec": 2048.4,
+      "fixture_generation_tok_per_sec": 64.2,
+      "rendered_metrics": {
+        "STARTED": "01:33:20",
+        "DURATION": "2.0 s",
+        "PROMPT TOKENS": "1 024",
+        "COMPLETION TOKENS": "64",
+        "TOTAL TOKENS": "1 088",
+        "CONTEXT": "32 768",
+        "FIRST TOKEN": "1.0 s",
+        "GENERATING": "1.0 s",
+        "PROMPT SPEED": "2048 tok/s",
+        "GENERATION SPEED": "64.2 tok/s",
+        "STOP REASON": "stop"
+      },
+      "has_prompt_speed": true,
+      "has_generation_speed": true,
+      "has_legacy_speed": false
+    }
+  },
+  "browser": "Chromium 141 / Playwright 1.56",
+  "viewport": "1500x1000",
+  "composite": "before-after.png"
+}
