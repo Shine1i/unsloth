@@ -1,0 +1,398 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Disposable evidence harness for upstream PR 8884. Delete with its staging branch.
+name: "PR 8884 Tauri WebDriver A-B"
+
+on:
+  push:
+    branches:
+      - mimir-pr8884-tauri-webdriver-20260816T220100Z
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr8884-tauri-webdriver-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-nvidia-x11-ab:
+    name: "Linux Tauri WebDriver (${{ matrix.side }})"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - side: base
+            ref: c87fe20e32aca9ceb2dc5059c2987738f32446e8
+            expected: fail
+          - side: pr
+            ref: f5c78d3cef3e4e1861c948a2f6facf43eae9dda3
+            expected: pass
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+
+      - name: Install Linux Tauri and native WebDriver dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev webkit2gtk-driver xvfb
+          command -v WebKitWebDriver
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: false
+          workspaces: studio/src-tauri -> target
+
+      - name: Build the exact side under test
+        run: |
+          python3 scripts/lockfile_supply_chain_audit.py
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          npm run --prefix studio/frontend build
+          cargo test --manifest-path studio/src-tauri/Cargo.toml linux_webkit --no-fail-fast
+          cargo build --manifest-path studio/src-tauri/Cargo.toml
+          test -x studio/src-tauri/target/debug/unsloth-studio
+
+      - name: Install tauri-driver
+        run: |
+          cargo install tauri-driver --locked
+          tauri-driver --version
+
+      - name: Prepare isolated desktop home and simulated NVIDIA module
+        run: |
+          set -euo pipefail
+          H="$RUNNER_TEMP/pr8884-home"
+          STUB_DIR="$H/.unsloth/studio/unsloth_studio/bin"
+          mkdir -p "$STUB_DIR" "$H/.config" "$H/xdg"
+          STUB_VERSION="$(sed -n 's/.*MIN_DESKTOP_BACKEND_VERSION: &str = "\([^"]*\)".*/\1/p' studio/src-tauri/src/preflight/version.rs)"
+          test -n "$STUB_VERSION"
+          cat > "$STUB_DIR/unsloth" <<'STUB'
+          #!/bin/sh
+          case "$*" in
+            "-h") exit 0 ;;
+            *desktop-capabilities*)
+              printf '%s\n' '{"desktop_protocol_version":1,"desktop_manageability_version":2,"supports_api_only":true,"supports_provision_desktop_auth":true,"supports_desktop_backend_ownership":true,"studio_install_ok":true,"version":"__STUB_VERSION__"}'
+              exit 0 ;;
+            *studio*--api-only*) exec sleep 120 ;;
+          esac
+          exit 1
+          STUB
+          sed -i "s/__STUB_VERSION__/$STUB_VERSION/" "$STUB_DIR/unsloth"
+          chmod +x "$STUB_DIR/unsloth"
+
+          # Hosted runners have no NVIDIA GPU. Mounting a private tmpfs over this
+          # normally read-only proc subtree lets both sides see the exact proc-file
+          # signal introduced by the PR while Xvfb keeps the display path X11.
+          sudo mount -t tmpfs -o mode=755 pr8884-nvidia /proc/driver
+          sudo mkdir -p /proc/driver/nvidia
+          printf '%s\n' 'NVRM version: simulated for PR 8884 A/B' | sudo tee /proc/driver/nvidia/version >/dev/null
+          test -e /proc/driver/nvidia/version
+          echo "SIMULATION_PASS proc_nvidia_version=present display=X11"
+
+      - name: Drive the real desktop and assert the NVIDIA X11 workaround
+        env:
+          SIDE: ${{ matrix.side }}
+          EXPECTED: ${{ matrix.expected }}
+        run: |
+          set -euo pipefail
+          export HOME="$RUNNER_TEMP/pr8884-home"
+          export XDG_RUNTIME_DIR="$HOME/xdg"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          unset WAYLAND_DISPLAY GDK_BACKEND WEBKIT_DISABLE_DMABUF_RENDERER WEBKIT_DMABUF_RENDERER_FORCE_SHM
+          export APPLICATION="$GITHUB_WORKSPACE/studio/src-tauri/target/debug/unsloth-studio"
+          export EXPECTED_LOG='NVIDIA driver loaded; set WEBKIT_DISABLE_DMABUF_RENDERER=1 for WebKitGTK compatibility'
+
+          cat > "$RUNNER_TEMP/pr8884_webdriver_probe.py" <<'PY'
+          import http.client
+          import json
+          import os
+          import pathlib
+          import socket
+          import subprocess
+          import sys
+          import time
+          import urllib.request
+
+          driver_log_path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "tauri-driver.log"
+          driver_log = driver_log_path.open("w", encoding="utf-8")
+          proc = subprocess.Popen(["tauri-driver"], stdout=driver_log, stderr=subprocess.STDOUT)
+          session_id = None
+
+          def request(method, path, payload=None, timeout=120):
+              body = None if payload is None else json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  "http://127.0.0.1:4444" + path,
+                  data=body,
+                  method=method,
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req, timeout=timeout) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+          try:
+              deadline = time.time() + 30
+              while time.time() < deadline:
+                  try:
+                      with socket.create_connection(("127.0.0.1", 4444), timeout=1):
+                          break
+                  except OSError:
+                      if proc.poll() is not None:
+                          raise RuntimeError(f"tauri-driver exited early with {proc.returncode}")
+                      time.sleep(0.25)
+              else:
+                  raise TimeoutError("tauri-driver did not listen on port 4444")
+
+              response = request(
+                  "POST",
+                  "/session",
+                  {
+                      "capabilities": {
+                          "alwaysMatch": {
+                              "browserName": "wry",
+                              "tauri:options": {"application": os.environ["APPLICATION"]},
+                          }
+                      }
+                  },
+              )
+              value = response.get("value", {})
+              session_id = response.get("sessionId") or value.get("sessionId")
+              if not session_id:
+                  raise RuntimeError(f"WebDriver returned no session id: {response}")
+
+              title = request("GET", f"/session/{session_id}/title").get("value", "")
+              source = request("GET", f"/session/{session_id}/source").get("value", "")
+              if len(source.strip()) < 100:
+                  raise AssertionError(f"desktop DOM was unexpectedly small: {len(source)} bytes")
+              print(f"WEBDRIVER_PASS title={title!r} source_bytes={len(source)}")
+
+              log_path = pathlib.Path.home() / ".unsloth" / "studio" / "tauri.log"
+              deadline = time.time() + 20
+              text = ""
+              while time.time() < deadline:
+                  if log_path.exists():
+                      text = log_path.read_text(encoding="utf-8", errors="replace")
+                      if os.environ["EXPECTED_LOG"] in text:
+                          break
+                  time.sleep(0.25)
+              if os.environ["EXPECTED_LOG"] not in text:
+                  print(
+                      "ASSERTION_FAIL expected PR renderer line missing: " + os.environ["EXPECTED_LOG"],
+                      file=sys.stderr,
+                  )
+                  raise SystemExit(42)
+              print("RENDERER_ASSERTION_PASS " + os.environ["EXPECTED_LOG"])
+          finally:
+              if session_id:
+                  try:
+                      request("DELETE", f"/session/{session_id}", timeout=15)
+                  except Exception as error:
+                      print(f"WebDriver cleanup warning: {error}", file=sys.stderr)
+              proc.terminate()
+              try:
+                  proc.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  proc.kill()
+                  proc.wait(timeout=5)
+              driver_log.close()
+          PY
+
+          set +e
+          xvfb-run -a --server-args='-screen 0 1440x900x24 -nolisten tcp' \
+            python3 "$RUNNER_TEMP/pr8884_webdriver_probe.py" 2>&1 | tee "$RUNNER_TEMP/probe.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$EXPECTED" = fail ]; then
+            test "$rc" -eq 42
+            grep -F 'WEBDRIVER_PASS' "$RUNNER_TEMP/probe.log"
+            grep -F 'ASSERTION_FAIL expected PR renderer line missing' "$RUNNER_TEMP/probe.log"
+            echo 'EXPECTED_NEGATIVE_PASS base reached the real Tauri DOM but failed the exact NVIDIA X11 workaround assertion'
+          else
+            test "$rc" -eq 0
+            grep -F 'WEBDRIVER_PASS' "$RUNNER_TEMP/probe.log"
+            grep -F 'RENDERER_ASSERTION_PASS' "$RUNNER_TEMP/probe.log"
+            echo 'POSITIVE_PASS PR reached the real Tauri DOM and selected WEBKIT_DISABLE_DMABUF_RENDERER on NVIDIA X11'
+          fi
+
+      - name: Show sanitized evidence logs
+        if: always()
+        run: |
+          echo '--- probe ---'
+          cat "$RUNNER_TEMP/probe.log" 2>/dev/null || true
+          echo '--- tauri ---'
+          grep -E 'Unsloth desktop app starting|NVIDIA driver loaded|WEBKIT_.*DMABUF|Wayland session' \
+            "$RUNNER_TEMP/pr8884-home/.unsloth/studio/tauri.log" 2>/dev/null || true
+          echo '--- tauri-driver tail ---'
+          tail -40 "$RUNNER_TEMP/tauri-driver.log" 2>/dev/null || true
+
+      - name: Unmount simulated proc subtree
+        if: always()
+        run: sudo umount /proc/driver || true
+
+  windows-webdriver:
+    name: Windows Tauri WebDriver app-shell
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: f5c78d3cef3e4e1861c948a2f6facf43eae9dda3
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: false
+          workspaces: studio/src-tauri -> target
+
+      - name: Build PR head on Windows
+        shell: pwsh
+        run: |
+          python scripts/lockfile_supply_chain_audit.py
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          npm run --prefix studio/frontend build
+          cargo test --manifest-path studio/src-tauri/Cargo.toml --no-fail-fast
+          cargo build --manifest-path studio/src-tauri/Cargo.toml
+          if (-not (Test-Path studio/src-tauri/target/debug/unsloth-studio.exe)) { throw 'desktop binary missing' }
+
+      - name: Install tauri-driver and matching Edge driver
+        shell: pwsh
+        run: |
+          cargo install tauri-driver --locked
+          cargo install --git https://github.com/chippers/msedgedriver-tool
+          & "$HOME/.cargo/bin/msedgedriver-tool.exe"
+          $PWD.Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Drive the PR desktop on Windows
+        shell: pwsh
+        env:
+          APPLICATION: ${{ github.workspace }}\studio\src-tauri\target\debug\unsloth-studio.exe
+        run: |
+          @'
+          import json
+          import os
+          import pathlib
+          import socket
+          import subprocess
+          import time
+          import urllib.request
+
+          log_path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "tauri-driver-windows.log"
+          log = log_path.open("w", encoding="utf-8")
+          proc = subprocess.Popen(["tauri-driver"], stdout=log, stderr=subprocess.STDOUT)
+          session_id = None
+
+          def request(method, path, payload=None, timeout=120):
+              body = None if payload is None else json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  "http://127.0.0.1:4444" + path,
+                  data=body,
+                  method=method,
+                  headers={"Content-Type": "application/json"},
+              )
+              with urllib.request.urlopen(req, timeout=timeout) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+          try:
+              deadline = time.time() + 30
+              while time.time() < deadline:
+                  try:
+                      with socket.create_connection(("127.0.0.1", 4444), timeout=1):
+                          break
+                  except OSError:
+                      if proc.poll() is not None:
+                          raise RuntimeError(f"tauri-driver exited early with {proc.returncode}")
+                      time.sleep(0.25)
+              else:
+                  raise TimeoutError("tauri-driver did not listen on port 4444")
+
+              response = request(
+                  "POST",
+                  "/session",
+                  {
+                      "capabilities": {
+                          "alwaysMatch": {
+                              "browserName": "wry",
+                              "tauri:options": {"application": os.environ["APPLICATION"]},
+                          }
+                      }
+                  },
+              )
+              value = response.get("value", {})
+              session_id = response.get("sessionId") or value.get("sessionId")
+              if not session_id:
+                  raise RuntimeError(f"WebDriver returned no session id: {response}")
+              title = request("GET", f"/session/{session_id}/title").get("value", "")
+              source = request("GET", f"/session/{session_id}/source").get("value", "")
+              if len(source.strip()) < 100:
+                  raise AssertionError(f"desktop DOM was unexpectedly small: {len(source)} bytes")
+              print(f"WINDOWS_WEBDRIVER_PASS title={title!r} source_bytes={len(source)}")
+          finally:
+              if session_id:
+                  try:
+                      request("DELETE", f"/session/{session_id}", timeout=15)
+                  except Exception as error:
+                      print(f"WebDriver cleanup warning: {error}")
+              proc.terminate()
+              try:
+                  proc.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  proc.kill()
+                  proc.wait(timeout=5)
+              log.close()
+          '@ | Set-Content -Path "$env:RUNNER_TEMP\pr8884_windows_probe.py" -Encoding utf8
+          python "$env:RUNNER_TEMP\pr8884_windows_probe.py"
+
+      - name: Show tauri-driver tail
+        if: always()
+        shell: pwsh
+        run: Get-Content "$env:RUNNER_TEMP\tauri-driver-windows.log" -Tail 40 -ErrorAction SilentlyContinue
+
+  macos-contract:
+    name: macOS Tauri compile/unit contract
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: f5c78d3cef3e4e1861c948a2f6facf43eae9dda3
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: false
+          workspaces: studio/src-tauri -> target
+
+      - name: Build frontend and run macOS Tauri contracts
+        run: |
+          python3 scripts/lockfile_supply_chain_audit.py
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          npm run --prefix studio/frontend build
+          cargo test --manifest-path studio/src-tauri/Cargo.toml --no-fail-fast
+          cargo check --manifest-path studio/src-tauri/Cargo.toml --all-targets --release
+          echo 'MACOS_CONTRACT_PASS (native tauri-driver is unsupported on WKWebView; this is compile/unit coverage)'
