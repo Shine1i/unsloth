@@ -159,6 +159,12 @@ jobs:
               else:
                   raise TimeoutError("tauri-driver did not listen on port 4444")
 
+
+              # tauri-driver opens its proxy port before WebKitWebDriver's
+              # downstream port is necessarily ready. Avoid classifying that
+              # startup race as the base-side negative assertion.
+              time.sleep(2)
+
               response = request(
                   "POST",
                   "/session",
