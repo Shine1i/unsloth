@@ -1,0 +1,461 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Disposable live evidence harness for upstream PR 8884 comments.
+name: "PR 8884 comment claims live E2E"
+
+on:
+  push:
+    branches:
+      - mimir-pr8884-comments-e2e-20260816T225432Z
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr8884-comment-claims-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-live-desktop:
+    name: Linux Tauri/WebDriver renderer and relaunch E2E
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prove exact PR implementation under test
+        run: |
+          set -euo pipefail
+          PR_HEAD=f5c78d3cef3e4e1861c948a2f6facf43eae9dda3
+          git merge-base --is-ancestor "$PR_HEAD" HEAD
+          git diff --exit-code "$PR_HEAD" -- \
+            studio/src-tauri/src/linux_webkit.rs \
+            studio/src-tauri/src/main.rs \
+            studio/frontend/src/hooks/use-tauri-update.ts \
+            studio/src-tauri/Cargo.lock
+          echo "SOURCE_PIN_PASS pr_head=$PR_HEAD harness_head=$(git rev-parse HEAD)"
+
+      - name: Install Linux desktop and WebDriver dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev webkit2gtk-driver xvfb mesa-utils
+          command -v WebKitWebDriver
+          command -v glxinfo
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-03-27
+
+      - uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: false
+          workspaces: studio/src-tauri -> target
+
+      - name: Build PR desktop and run renderer unit contract
+        run: |
+          set -euo pipefail
+          python3 scripts/lockfile_supply_chain_audit.py
+          npm ci --prefix studio/frontend --no-fund --no-audit
+          npm run --prefix studio/frontend build
+          cargo test --manifest-path studio/src-tauri/Cargo.toml linux_webkit --no-fail-fast
+          cargo build --manifest-path studio/src-tauri/Cargo.toml
+          test -x studio/src-tauri/target/debug/unsloth-studio
+
+      - name: Install pinned tauri-driver
+        run: |
+          cargo install tauri-driver --version 2.0.6 --locked
+          tauri-driver --help >/dev/null
+          echo 'TAURI_DRIVER_INSTALL_PASS version=2.0.6'
+
+      - name: Prepare isolated desktop home and proc-file signal
+        run: |
+          set -euo pipefail
+          H="$RUNNER_TEMP/pr8884-comments-home"
+          STUB_DIR="$H/.unsloth/studio/unsloth_studio/bin"
+          mkdir -p "$STUB_DIR" "$H/.config" "$H/xdg"
+          chmod 700 "$H/xdg"
+          STUB_VERSION="$(sed -n 's/.*MIN_DESKTOP_BACKEND_VERSION: &str = "\([^"]*\)".*/\1/p' studio/src-tauri/src/preflight/version.rs)"
+          test -n "$STUB_VERSION"
+          cat > "$STUB_DIR/unsloth" <<'STUB'
+          #!/bin/sh
+          case "$*" in
+            "-h") exit 0 ;;
+            *desktop-capabilities*)
+              printf '%s\n' '{"desktop_protocol_version":1,"desktop_manageability_version":2,"supports_api_only":true,"supports_provision_desktop_auth":true,"supports_desktop_backend_ownership":true,"studio_install_ok":true,"version":"__STUB_VERSION__"}'
+              exit 0 ;;
+            *studio*--api-only*) exec sleep 180 ;;
+          esac
+          exit 1
+          STUB
+          sed -i "s/__STUB_VERSION__/$STUB_VERSION/" "$STUB_DIR/unsloth"
+          chmod +x "$STUB_DIR/unsloth"
+
+          # Hosted runners have no NVIDIA device. A private tmpfs supplies only
+          # the system-wide module-presence signal consumed by PR 8884.
+          sudo mount -t tmpfs -o mode=755 pr8884-comments-nvidia /proc/driver
+          sudo mkdir -p /proc/driver/nvidia
+          printf '%s\n' 'NVRM version: simulated module presence only' | sudo tee /proc/driver/nvidia/version >/dev/null
+          test -e /proc/driver/nvidia/version
+          test ! -e /dev/nvidia0
+          echo 'PROC_SIGNAL_PASS version_file=present nvidia_device=absent'
+
+      - name: Run real webview, operator override, restart, and clean launch
+        env:
+          HOME: ${{ runner.temp }}/pr8884-comments-home
+          XDG_RUNTIME_DIR: ${{ runner.temp }}/pr8884-comments-home/xdg
+          APPLICATION: ${{ github.workspace }}/studio/src-tauri/target/debug/unsloth-studio
+        run: |
+          set -euo pipefail
+          export DISPLAY=:99
+          Xvfb "$DISPLAY" -screen 0 1440x900x24 -nolisten tcp > "$RUNNER_TEMP/xvfb.log" 2>&1 &
+          XVFB_PID=$!
+          cleanup() {
+            pkill -TERM -f "$APPLICATION" 2>/dev/null || true
+            pkill -TERM -f WebKitWebDriver 2>/dev/null || true
+            kill "$XVFB_PID" 2>/dev/null || true
+            wait "$XVFB_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 80); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            sleep 0.25
+          done
+          test -e /tmp/.X11-unix/X99
+
+          glxinfo -B | tee "$RUNNER_TEMP/glxinfo.txt"
+          grep -Eq 'OpenGL renderer string:.*(llvmpipe|softpipe)' "$RUNNER_TEMP/glxinfo.txt"
+          echo 'SOFTWARE_RENDERER_PASS active_renderer=llvmpipe_or_softpipe'
+
+          cat > "$RUNNER_TEMP/pr8884_comments_e2e.py" <<'PY'
+          import json
+          import os
+          import pathlib
+          import signal
+          import socket
+          import subprocess
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          APP = pathlib.Path(os.environ["APPLICATION"]).resolve()
+          HOME = pathlib.Path(os.environ["HOME"])
+          LOG = HOME / ".unsloth" / "studio" / "tauri.log"
+          DRIVER_LOG = pathlib.Path(os.environ["RUNNER_TEMP"]) / "tauri-driver-live.log"
+          DISABLE = "WEBKIT_DISABLE_DMABUF_RENDERER"
+          FORCE = "WEBKIT_DMABUF_RENDERER_FORCE_SHM"
+          NVIDIA_LINE = "NVIDIA driver loaded; set WEBKIT_DISABLE_DMABUF_RENDERER=1 for WebKitGTK compatibility"
+
+          def request(method, path, payload=None, timeout=120):
+              body = None if payload is None else json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  "http://127.0.0.1:4444" + path,
+                  data=body,
+                  method=method,
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as response:
+                      raw = response.read().decode("utf-8")
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as error:
+                  detail = error.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(f"WebDriver HTTP {error.code}: {detail}") from error
+
+          def wait_port(opened=True, timeout=30):
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  try:
+                      with socket.create_connection(("127.0.0.1", 4444), timeout=0.5):
+                          state = True
+                  except OSError:
+                      state = False
+                  if state == opened:
+                      return
+                  time.sleep(0.2)
+              raise TimeoutError(f"port 4444 opened={opened} did not reach expected state")
+
+          def proc_exe(pid):
+              try:
+                  return pathlib.Path(os.readlink(f"/proc/{pid}/exe")).resolve()
+              except (FileNotFoundError, PermissionError, OSError):
+                  return None
+
+          def app_pids():
+              result = set()
+              for item in pathlib.Path("/proc").iterdir():
+                  if item.name.isdigit() and proc_exe(int(item.name)) == APP:
+                      result.add(int(item.name))
+              return result
+
+          def wait_app_pid(exclude=frozenset(), timeout=30):
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  candidates = app_pids() - set(exclude)
+                  if candidates:
+                      return max(candidates)
+                  time.sleep(0.2)
+              raise TimeoutError(f"no app pid appeared; excluded={sorted(exclude)}")
+
+          def read_env(pid):
+              data = pathlib.Path(f"/proc/{pid}/environ").read_bytes()
+              pairs = {}
+              for entry in data.split(b"\0"):
+                  if b"=" in entry:
+                      key, value = entry.split(b"=", 1)
+                      pairs[key.decode(errors="replace")] = value.decode(errors="replace")
+              return pairs
+
+          def parent_pid(pid):
+              try:
+                  # The comm field may contain spaces and parentheses; parse after its final ')'.
+                  stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+                  return int(stat.rsplit(")", 1)[1].split()[1])
+              except (FileNotFoundError, PermissionError, ValueError, IndexError):
+                  return None
+
+          def descendants(root):
+              all_pids = [int(p.name) for p in pathlib.Path("/proc").iterdir() if p.name.isdigit()]
+              children = {}
+              for pid in all_pids:
+                  ppid = parent_pid(pid)
+                  if ppid is not None:
+                      children.setdefault(ppid, set()).add(pid)
+              found = set()
+              todo = [root]
+              while todo:
+                  parent = todo.pop()
+                  for child in children.get(parent, ()):
+                      if child not in found:
+                          found.add(child)
+                          todo.append(child)
+              return found
+
+          def proc_name(pid):
+              try:
+                  return pathlib.Path(f"/proc/{pid}/comm").read_text().strip()
+              except OSError:
+                  return "gone"
+
+          def wait_descendant_env(root, expected, absent=(), timeout=30):
+              deadline = time.time() + timeout
+              last = []
+              while time.time() < deadline:
+                  last = []
+                  for pid in descendants(root):
+                      try:
+                          env = read_env(pid)
+                      except OSError:
+                          continue
+                      last.append((pid, proc_name(pid), {k: env.get(k) for k in (DISABLE, FORCE)}))
+                      if all(env.get(k) == v for k, v in expected.items()) and all(k not in env for k in absent):
+                          print(f"WEBKIT_CHILD_ENV_PASS pid={pid} name={proc_name(pid)} expected={expected} absent={list(absent)}")
+                          return pid
+                  time.sleep(0.2)
+              raise AssertionError(f"no descendant of {root} had expected={expected}, absent={absent}; last={last}")
+
+          def log_text():
+              return LOG.read_text(encoding="utf-8", errors="replace") if LOG.exists() else ""
+
+          def wait_log(fragment, minimum=1, timeout=30):
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  text = log_text()
+                  if text.count(fragment) >= minimum:
+                      return text
+                  time.sleep(0.2)
+              raise AssertionError(f"log never reached {minimum} copies of {fragment!r}: {log_text()[-2000:]}")
+
+          def reset_log():
+              deadline = time.time() + 15
+              while time.time() < deadline and app_pids():
+                  time.sleep(0.2)
+              if app_pids():
+                  raise AssertionError(f"apps still alive before log reset: {app_pids()}")
+              LOG.unlink(missing_ok=True)
+
+          def terminate_pid(pid):
+              try:
+                  os.kill(pid, signal.SIGTERM)
+              except ProcessLookupError:
+                  return
+              deadline = time.time() + 10
+              while time.time() < deadline and pathlib.Path(f"/proc/{pid}").exists():
+                  time.sleep(0.1)
+              if pathlib.Path(f"/proc/{pid}").exists():
+                  try:
+                      os.kill(pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+
+          def start_session(overrides):
+              env = os.environ.copy()
+              env.pop(DISABLE, None)
+              env.pop(FORCE, None)
+              env.update(overrides)
+              log_handle = DRIVER_LOG.open("a", encoding="utf-8")
+              driver = subprocess.Popen(["tauri-driver"], env=env, stdout=log_handle, stderr=subprocess.STDOUT)
+              wait_port(True)
+              time.sleep(2)
+              response = request(
+                  "POST",
+                  "/session",
+                  {"capabilities": {"alwaysMatch": {"browserName": "wry", "tauri:options": {"application": str(APP)}}}},
+              )
+              value = response.get("value", {})
+              session_id = response.get("sessionId") or value.get("sessionId")
+              if not session_id:
+                  raise AssertionError(f"no WebDriver session id: {response}")
+              pid = wait_app_pid()
+              title = request("GET", f"/session/{session_id}/title").get("value", "")
+              source = request("GET", f"/session/{session_id}/source").get("value", "")
+              if len(source.strip()) < 100:
+                  raise AssertionError(f"desktop DOM too small: {len(source)}")
+              print(f"WEBDRIVER_DOM_PASS pid={pid} title={title!r} source_bytes={len(source)} overrides={overrides}")
+              return driver, log_handle, session_id, pid
+
+          def stop_session(driver, log_handle, session_id):
+              if session_id:
+                  try:
+                      request("DELETE", f"/session/{session_id}", timeout=15)
+                  except Exception as error:
+                      print(f"session cleanup warning: {error}", file=sys.stderr)
+              driver.terminate()
+              try:
+                  driver.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  driver.kill()
+                  driver.wait(timeout=5)
+              log_handle.close()
+              for pid in list(app_pids()):
+                  terminate_pid(pid)
+              try:
+                  wait_port(False, timeout=15)
+              except TimeoutError:
+                  subprocess.run(["pkill", "-TERM", "-f", "WebKitWebDriver"], check=False)
+                  wait_port(False, timeout=15)
+
+          # 1. A software-rendered X11 desktop plus only the global NVIDIA proc
+          # signal still takes the PR's NVIDIA path and renders the real app DOM.
+          reset_log()
+          driver, handle, session, pid = start_session({})
+          try:
+              wait_descendant_env(pid, {DISABLE: "1"}, absent=(FORCE,))
+              wait_log(NVIDIA_LINE)
+              print("HYBRID_FALSE_POSITIVE_CONFIRMED detector=module_presence active_renderer=software dom=rendered fallback=disable_dmabuf")
+          finally:
+              stop_session(driver, handle, session)
+
+          # 2. The documented =0 escape hatch is preserved ahead of detection.
+          reset_log()
+          driver, handle, session, pid = start_session({DISABLE: "0"})
+          try:
+              wait_descendant_env(pid, {DISABLE: "0"}, absent=(FORCE,))
+              wait_log("Unsloth desktop app starting")
+              if NVIDIA_LINE in log_text():
+                  raise AssertionError("operator override unexpectedly produced the NVIDIA default log")
+              print("OPERATOR_OVERRIDE_PASS WEBKIT_DISABLE_DMABUF_RENDERER=0 preserved dom=rendered")
+          finally:
+              stop_session(driver, handle, session)
+
+          # 3. Start with the exact environment left by an older Wayland build,
+          # invoke the real Tauri process plugin from the webview, and inspect the
+          # replacement process and its WebKit child.
+          reset_log()
+          driver, handle, session, old_pid = start_session({FORCE: "1"})
+          replacement_pid = None
+          try:
+              initial = read_env(old_pid)
+              if initial.get(FORCE) != "1" or DISABLE in initial:
+                  raise AssertionError(f"bad inherited-start env: disable={initial.get(DISABLE)!r} force={initial.get(FORCE)!r}")
+              wait_descendant_env(old_pid, {FORCE: "1"}, absent=(DISABLE,))
+              wait_log("Unsloth desktop app starting")
+              if NVIDIA_LINE in log_text():
+                  raise AssertionError("inherited FORCE_SHM unexpectedly reached the NVIDIA default")
+
+              api = request(
+                  "POST",
+                  f"/session/{session}/execute/sync",
+                  {"script": "return typeof window.__TAURI__ + ':' + typeof window.__TAURI__.process + ':' + typeof window.__TAURI__.process.relaunch;", "args": []},
+              ).get("value")
+              if api != "object:object:function":
+                  raise AssertionError(f"global process relaunch API unavailable: {api!r}")
+              print(f"RELAUNCH_API_PASS value={api}")
+
+              scheduled = request(
+                  "POST",
+                  f"/session/{session}/execute/sync",
+                  {"script": "setTimeout(() => window.__TAURI__.process.relaunch(), 0); return 'scheduled';", "args": []},
+              ).get("value")
+              if scheduled != "scheduled":
+                  raise AssertionError(f"relaunch was not scheduled: {scheduled!r}")
+
+              replacement_pid = wait_app_pid(exclude={old_pid}, timeout=30)
+              deadline = time.time() + 30
+              while time.time() < deadline and pathlib.Path(f"/proc/{old_pid}").exists():
+                  time.sleep(0.2)
+              if pathlib.Path(f"/proc/{old_pid}").exists():
+                  raise AssertionError(f"old process {old_pid} remained after relaunch")
+
+              inherited = read_env(replacement_pid)
+              if inherited.get(FORCE) != "1" or DISABLE in inherited:
+                  raise AssertionError(f"replacement env: disable={inherited.get(DISABLE)!r} force={inherited.get(FORCE)!r}")
+              wait_log("Unsloth desktop app starting", minimum=2)
+              wait_descendant_env(replacement_pid, {FORCE: "1"}, absent=(DISABLE,))
+              if NVIDIA_LINE in log_text():
+                  raise AssertionError("replacement unexpectedly applied NVIDIA disable-DMABUF")
+              time.sleep(3)
+              if not pathlib.Path(f"/proc/{replacement_pid}").exists():
+                  raise AssertionError("replacement process did not stay alive")
+              print(f"INHERITED_RELAUNCH_CONFIRMED old_pid={old_pid} replacement_pid={replacement_pid} force_shm=1 disable_dmabuf=absent startups=2")
+          finally:
+              if replacement_pid:
+                  terminate_pid(replacement_pid)
+              # The old WebDriver session is expected to be disconnected by restart.
+              stop_session(driver, handle, None)
+
+          # 4. A later clean external launch has no inherited override and does
+          # take the PR's NVIDIA branch, exactly as the author described.
+          reset_log()
+          env = os.environ.copy()
+          env.pop(DISABLE, None)
+          env.pop(FORCE, None)
+          external_log_path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "clean-external-launch.log"
+          with external_log_path.open("w", encoding="utf-8") as external_log:
+              clean = subprocess.Popen([str(APP)], env=env, stdout=external_log, stderr=subprocess.STDOUT)
+              try:
+                  wait_log(NVIDIA_LINE)
+                  wait_descendant_env(clean.pid, {DISABLE: "1"}, absent=(FORCE,))
+                  time.sleep(3)
+                  if clean.poll() is not None:
+                      raise AssertionError(f"clean external launch exited with {clean.returncode}")
+                  print(f"CLEAN_LAUNCH_RECOVERY_PASS pid={clean.pid} force_shm=absent disable_dmabuf=1")
+              finally:
+                  terminate_pid(clean.pid)
+
+          print("ALL_LIVE_ASSERTIONS_PASS")
+          PY
+
+          python3 "$RUNNER_TEMP/pr8884_comments_e2e.py" 2>&1 | tee "$RUNNER_TEMP/live-e2e.log"
+
+      - name: Show focused evidence logs
+        if: always()
+        run: |
+          echo '--- live assertions ---'
+          grep -E 'PASS|CONFIRMED|Traceback|AssertionError|TimeoutError' "$RUNNER_TEMP/live-e2e.log" 2>/dev/null || true
+          echo '--- GL renderer ---'
+          grep -E 'OpenGL vendor|string|OpenGL renderer' "$RUNNER_TEMP/glxinfo.txt" 2>/dev/null || true
+          echo '--- Tauri renderer decisions ---'
+          grep -E 'Unsloth desktop app starting|NVIDIA driver loaded|WEBKIT_.*DMABUF|Wayland session' \
+            "$RUNNER_TEMP/pr8884-comments-home/.unsloth/studio/tauri.log" 2>/dev/null || true
+          echo '--- tauri-driver tail ---'
+          tail -80 "$RUNNER_TEMP/tauri-driver-live.log" 2>/dev/null || true
+
+      - name: Unmount simulated proc subtree
+        if: always()
+        run: sudo umount /proc/driver || true
