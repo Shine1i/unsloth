@@ -65,8 +65,9 @@ jobs:
 
       - name: Install tauri-driver
         run: |
-          cargo install tauri-driver --locked
-          tauri-driver --version
+          cargo install tauri-driver --version 2.0.6 --locked
+          tauri-driver --help >/dev/null
+          echo 'TAURI_DRIVER_INSTALL_PASS version=2.0.6'
 
       - name: Prepare isolated desktop home and simulated NVIDIA module
         run: |
@@ -121,6 +122,8 @@ jobs:
           import subprocess
           import sys
           import time
+          import urllib.error
+
           import urllib.request
 
           driver_log_path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "tauri-driver.log"
@@ -136,8 +139,12 @@ jobs:
                   method=method,
                   headers={"Content-Type": "application/json"},
               )
-              with urllib.request.urlopen(req, timeout=timeout) as response:
-                  return json.loads(response.read().decode("utf-8"))
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as response:
+                      return json.loads(response.read().decode("utf-8"))
+              except urllib.error.HTTPError as error:
+                  detail = error.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(f"WebDriver HTTP {error.code}: {detail}") from error
 
           try:
               deadline = time.time() + 30
@@ -277,7 +284,7 @@ jobs:
       - name: Install tauri-driver and matching Edge driver
         shell: pwsh
         run: |
-          cargo install tauri-driver --locked
+          cargo install tauri-driver --version 2.0.6 --locked
           cargo install --git https://github.com/chippers/msedgedriver-tool
           & "$HOME/.cargo/bin/msedgedriver-tool.exe"
           $PWD.Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -294,6 +301,8 @@ jobs:
           import socket
           import subprocess
           import time
+          import urllib.error
+
           import urllib.request
 
           log_path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "tauri-driver-windows.log"
@@ -309,8 +318,12 @@ jobs:
                   method=method,
                   headers={"Content-Type": "application/json"},
               )
-              with urllib.request.urlopen(req, timeout=timeout) as response:
-                  return json.loads(response.read().decode("utf-8"))
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as response:
+                      return json.loads(response.read().decode("utf-8"))
+              except urllib.error.HTTPError as error:
+                  detail = error.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(f"WebDriver HTTP {error.code}: {detail}") from error
 
           try:
               deadline = time.time() + 30
