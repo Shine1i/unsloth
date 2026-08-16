@@ -24,6 +24,9 @@ jobs:
         with:
           persist-credentials: false
 
+          # Full history keeps the immutable PR head available across harness iterations.
+          fetch-depth: 0
+
       - name: Prove exact PR implementation under test
         run: |
           set -euo pipefail
