@@ -1,0 +1,55 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 9173 mmproj focused verification"
+
+on:
+  push:
+    branches:
+      - "pr-9173-mimir-pr9173-mmproj-20260818t130800z-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Backend mmproj fallback regressions"
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check uv
+          uv run --no-project --python 3.12 --with pytest --with httpx --with fastapi --with huggingface-hub --with pyjwt --with cryptography --with structlog --with typer --with python-multipart python -m pytest studio/backend/tests/test_llama_cpp_mmproj_fallback.py studio/backend/tests/test_inference_status_loaded_gguf.py -q
+
+      - name: "Frontend install"
+        shell: bash
+        run: |
+          cd studio/frontend
+          npm ci
+
+      - name: "Frontend mmproj fallback regressions"
+        shell: bash
+        run: |
+          cd studio/frontend
+          node --experimental-strip-types --test tests/mmproj-fallback.test.ts
+
+      - name: "Frontend typecheck"
+        shell: bash
+        run: |
+          cd studio/frontend
+          npm run typecheck
+
