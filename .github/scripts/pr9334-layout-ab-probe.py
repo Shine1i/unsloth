@@ -175,18 +175,19 @@ MEASURE = r"""
 
 async def authenticate(base_url: str, password: str):
     auth = await login(base_url, "unsloth", password)
-    if auth.must_change_password:
-        new_password = "PR9334-CI-Layout-Only!"
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"{base_url}/api/auth/change-password",
-                headers={"Authorization": f"Bearer {auth.access_token}"},
-                json={"current_password": password, "new_password": new_password},
-            )
-            response.raise_for_status()
-            body = response.json()
-        auth.access_token = body["access_token"]
-        auth.refresh_token = body.get("refresh_token", "")
+    # Every CI job uses a fresh home, so this login is necessarily the bootstrap
+    # credential and must be rotated before authenticated application routes work.
+    new_password = "PR9334-CI-Layout-Only!"
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            f"{base_url}/api/auth/change-password",
+            headers={"Authorization": f"Bearer {auth.access_token}"},
+            json={"current_password": password, "new_password": new_password},
+        )
+        response.raise_for_status()
+        body = response.json()
+    auth.access_token = body["access_token"]
+    auth.refresh_token = body.get("refresh_token", "")
     return auth
 
 
