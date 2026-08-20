@@ -1,0 +1,38 @@
+{
+  "viewport": {
+    "width": 1366,
+    "height": 640
+  },
+  "rail_rect": {
+    "top": 424,
+    "bottom": 624,
+    "left": 890,
+    "right": 1362,
+    "width": 472,
+    "height": 200
+  },
+  "rail_inline_bottom": "16px",
+  "rail_inline_max_height": "200px",
+  "rail_css_max_height": "200px",
+  "rail_scroll_height": 200,
+  "rail_client_height": 200,
+  "rail_child_count": 2,
+  "banner_height": 184,
+  "wrapper_height": 8,
+  "panel_height": 8,
+  "panel_natural_height": 41,
+  "panel_visible_height": 8,
+  "header_height": 41,
+  "header_visible_height": 7,
+  "row_height": 77.765625,
+  "row_visible_height": 0,
+  "panel_text": "Downloading 1 item unsloth/PR-9334-layout-fixture 67 MB / 537 MB",
+  "cancel_present": true,
+  "cancel_visible": false,
+  "requests": {
+    "active": 1,
+    "status": 4,
+    "progress": 1,
+    "update": 2
+  }
+}
