@@ -1,0 +1,45 @@
+name: "PR 9237 Ollama GGUF metadata"
+
+on:
+  push:
+    branches:
+      - "pr-9237-mimir-pr9237-codex-gguf-b0de0ce-20260820t0725z-ci"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-14
+          - windows-latest
+    defaults:
+      run:
+        working-directory: studio/frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          cache: npm
+          cache-dependency-path: studio/frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Verify Ollama GGUF option metadata
+        run: node --experimental-strip-types --test tests/chat-local-model-options.test.ts
+      - name: Typecheck frontend
+        run: npm run typecheck
