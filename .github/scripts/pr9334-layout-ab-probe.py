@@ -194,13 +194,11 @@ async def authenticate(base_url: str, password: str):
 async def run_probe(base_url: str, password: str, artifact_dir: Path) -> dict:
     auth = await authenticate(base_url, password)
     init = seed_init_script(auth, [])
-    browser = os.environ.get("STUDIO_BROWSER", "chromium")
     async with open_chat(
         base_url,
         init_scripts=[init, fixture_script()],
         viewport=(1366, 640),
         headless=True,
-        browser_name=browser,
     ) as sp:
         page = sp.page
         await page.goto(base_url, wait_until="domcontentloaded")
