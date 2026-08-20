@@ -42,9 +42,39 @@ _OLLAMA_BLOB_NAME_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-"
 )
 
+_OLLAMA_LOADABLE_LAYER_MEDIA_TYPES = frozenset(
+    {
+        "application/vnd.ollama.image.model",
+        "application/vnd.ollama.image.projector",
+        # License text does not affect model behavior and does not need to be
+        # carried into llama.cpp.
+        "application/vnd.ollama.image.license",
+    }
+)
+
 
 def _ollama_manifest_ref(tag_file: Path) -> str:
     return f"{_OLLAMA_MANIFEST_REF_PREFIX}{quote(str(tag_file), safe = '')}"
+
+
+def is_ollama_manifest_ref(ref: str) -> bool:
+    """True when *ref* is an opaque ``ollama-manifest:`` inventory reference."""
+    return ref.startswith(_OLLAMA_MANIFEST_REF_PREFIX)
+
+
+def _unsupported_ollama_layer_media_types(layers: list[object]) -> tuple[str, ...]:
+    """Layer types whose behavior the direct llama.cpp load cannot preserve."""
+    unsupported: set[str] = set()
+    for layer in layers:
+        if not isinstance(layer, dict):
+            unsupported.add("<invalid layer>")
+            continue
+        media_type = layer.get("mediaType")
+        if not isinstance(media_type, str) or not media_type:
+            unsupported.add("<missing mediaType>")
+        elif media_type not in _OLLAMA_LOADABLE_LAYER_MEDIA_TYPES:
+            unsupported.add(media_type)
+    return tuple(sorted(unsupported))
 
 
 def _safe_is_file(path: Path) -> bool:
@@ -188,6 +218,7 @@ def _ollama_model_info_from_manifest(
     *,
     materialize_links: bool = False,
     links_root: Optional[Path] = None,
+    reject_unsupported_layers: bool = False,
 ) -> Optional[LocalModelInfo]:
     manifests_root = ollama_dir / "manifests"
     blobs_dir = ollama_dir / "blobs"
@@ -214,14 +245,24 @@ def _ollama_model_info_from_manifest(
     if not repo_name:
         return None
 
+    def invalid_manifest(reason: str) -> Optional[LocalModelInfo]:
+        message = f"Invalid Ollama manifest: {reason}"
+        if reject_unsupported_layers:
+            raise ValueError(message)
+        logger.debug("Skipping %s (%s)", tag_file, message)
+        return None
+
     try:
         manifest = json.loads(tag_file.read_text(encoding = "utf-8-sig"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-        logger.debug("Skipping unreadable/invalid Ollama manifest %s: %s", tag_file, e)
-        return None
+        return invalid_manifest(str(e))
+    if not isinstance(manifest, dict):
+        return invalid_manifest("top level must be a JSON object")
 
     config = manifest.get("config", {})
-    config_digest = config.get("digest", "") if isinstance(config, dict) else ""
+    if not isinstance(config, dict):
+        return invalid_manifest("config must be a JSON object")
+    config_digest = config.get("digest", "")
     model_type = ""
     file_type = ""
     if config_digest and blobs_dir.is_dir():
@@ -229,13 +270,30 @@ def _ollama_model_info_from_manifest(
         if config_blob is not None and _safe_is_file(config_blob):
             try:
                 cfg = json.loads(config_blob.read_text(encoding = "utf-8-sig"))
-                model_type = cfg.get("model_type", "")
-                file_type = cfg.get("file_type", "")
             except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-                logger.debug("Could not parse Ollama config blob %s: %s", config_blob, e)
+                return invalid_manifest(f"config blob could not be parsed: {e}")
+            if not isinstance(cfg, dict):
+                return invalid_manifest("config blob must be a JSON object")
+            model_type = cfg.get("model_type", "")
+            file_type = cfg.get("file_type", "")
 
     layers = manifest.get("layers") or []
     if not isinstance(layers, list):
+        return None
+
+    unsupported_layers = _unsupported_ollama_layer_media_types(layers)
+    if unsupported_layers:
+        rendered_layers = ", ".join(unsupported_layers)
+        if reject_unsupported_layers:
+            raise ValueError(
+                "Ollama manifest contains unsupported runtime layers that Studio cannot preserve: "
+                f"{rendered_layers}"
+            )
+        logger.debug(
+            "Skipping Ollama manifest %s with unsupported runtime layers: %s",
+            tag_file,
+            rendered_layers,
+        )
         return None
 
     model_blob: Optional[Path] = None
@@ -388,6 +446,7 @@ def materialize_ollama_model_ref(ref: str) -> str:
         tag_file,
         materialize_links = True,
         links_root = links_root,
+        reject_unsupported_layers = True,
     )
     if info is None or not info.path:
         raise ValueError("Could not materialize Ollama model from manifest")
