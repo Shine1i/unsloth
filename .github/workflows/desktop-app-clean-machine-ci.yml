@@ -25,6 +25,10 @@ on:
   pull_request:
     paths:
       - '.github/workflows/desktop-app-clean-machine-ci.yml'
+
+      # Disposable PR #9446 verification: build and launch the exact chat-history hotfix.
+      - 'studio/frontend/src/features/chat/utils/chat-history-storage.ts'
+      - 'studio/frontend/tests/legacy-chat-store-timeout.test.ts'
       - '.github/scripts/retry-with-apt-lock.sh'
 
       - '.github/scripts/resolve-desktop-release.py'
