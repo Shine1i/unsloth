@@ -1,0 +1,72 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 8724 chart formatter A-B"
+
+on:
+  push:
+    branches:
+      - "pr-8724-mimir-pr-8724-20260821084355-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+
+      - name: "Reproduce truncation at the merge base"
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/unslothai/unsloth.git 10f34dbf6919081a770a4393ffcf73e689e7d3f8
+          git checkout --detach 10f34dbf6919081a770a4393ffcf73e689e7d3f8
+          set +e
+          out=$(node --experimental-strip-types --input-type=module <<'NODE' 2>&1
+          import { formatMetric, formatAxisMetric } from './studio/frontend/src/features/studio/sections/charts/utils.ts';
+          for (const [name, fn] of [['formatMetric', formatMetric], ['formatAxisMetric', formatAxisMetric]]) {
+            const actual = fn(1000);
+            if (actual !== '1000') {
+              console.error(`REPRO_MISMATCH ${name}(1000) actual=${actual} expected=1000`);
+              process.exit(1);
+            }
+          }
+          NODE
+          )
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          test "$rc" -eq 1
+          grep -F 'REPRO_MISMATCH formatMetric(1000) actual=1 expected=1000' <<<"$out"
+          echo 'BEFORE_REPRO PASS: the merge-base assertion failed on the intended truncation (command exit 1)'
+
+      - name: "Verify the PR head preserves every digit"
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/unslothai/unsloth.git 20fb4a59c1153846924874712103febd7326f412
+          git checkout --detach 20fb4a59c1153846924874712103febd7326f412
+          node --experimental-strip-types --input-type=module <<'NODE'
+          import { formatMetric, formatAxisMetric } from './studio/frontend/src/features/studio/sections/charts/utils.ts';
+          for (const value of [1000, 1500, 2000, 25000, 1000000]) {
+            const expected = String(value);
+            for (const [name, fn] of [['formatMetric', formatMetric], ['formatAxisMetric', formatAxisMetric]]) {
+              const actual = fn(value);
+              if (actual !== expected) {
+                console.error(`AFTER_MISMATCH ${name}(${value}) actual=${actual} expected=${expected}`);
+                process.exit(1);
+              }
+            }
+          }
+          console.log('AFTER_FIX PASS: both formatters preserved all tested integer digits (command exit 0)');
+          NODE
