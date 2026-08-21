@@ -1,0 +1,109 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 9461 Vulkan UMA A-B live repro"
+
+on:
+  push:
+    branches:
+      - "pr-9461-mimir-pr9461-vulkan-uma-20260821084739-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "windows-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Install focused probe dependencies"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --upgrade pip
+          python -m pip install pytest huggingface-hub
+
+      - name: "Write identical Vulkan UMA launch probe"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          @'
+          from __future__ import annotations
+
+          import importlib.util
+          import os
+          import subprocess
+          import tempfile
+          from pathlib import Path
+          from unittest.mock import patch
+
+          source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          test_path = Path("studio/backend/tests/test_llama_cpp_placement.py").resolve()
+          spec = importlib.util.spec_from_file_location("pr9461_test_helpers", test_path)
+          module = importlib.util.module_from_spec(spec)
+          assert spec and spec.loader
+          spec.loader.exec_module(module)
+
+          backend, gguf = module._backend(
+              Path(tempfile.mkdtemp(prefix="pr9461-")),
+              vulkan=True,
+              memory=[(0, 107 * 1024, 0)],
+          )
+          module._restore_host_guard(backend)
+          backend._get_gguf_size_bytes = lambda _path: int(16.5 * 1024**3)
+
+          error = None
+          captured = None
+          with patch.object(
+              module.LlamaCppBackend,
+              "_available_system_memory_mib",
+              staticmethod(lambda: 13 * 1024),
+          ), patch.object(
+              module.LlamaCppBackend,
+              "_cgroup_available_memory_mib",
+              staticmethod(lambda: None),
+          ):
+              try:
+                  captured = module._launch(backend, gguf)
+              except RuntimeError as exc:
+                  error = str(exc)
+
+          expect = os.environ["EXPECT"]
+          print(f"SOURCE_SHA={source_sha}")
+          print("TELEMETRY=model_16.5_GiB vulkan_free_107_GiB host_available_13_GiB cgroup=none")
+          if expect == "launch":
+              assert error is None, error
+              assert captured and captured.get("cmd"), captured
+              print("PASS positive: Vulkan UMA launch reached the mocked llama-server spawn")
+          elif expect == "reject":
+              assert error and "does not fit in GPU memory" in error, error
+              assert captured is None
+              print("PASS negative: base reproduced the false pre-launch GPU-memory rejection")
+          else:
+              raise AssertionError(f"unknown EXPECT={expect}")
+          '@ | Set-Content -LiteralPath "$env:RUNNER_TEMP\pr9461_probe.py" -Encoding utf8
+
+      - name: "Positive PR behavior and focused regressions"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:EXPECT = "launch"
+          python "$env:RUNNER_TEMP\pr9461_probe.py"
+          python -m pytest studio/backend/tests/test_llama_cpp_placement.py -q -k "vulkan_igpu"
+
+      - name: "Negative fresh-main behavior with identical probe"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git switch --detach 46fd06cf9f3edd277c5b8c37bb8a4e4a2e1426b3
+          $env:EXPECT = "reject"
+          python "$env:RUNNER_TEMP\pr9461_probe.py"
