@@ -307,6 +307,18 @@ function resolveAutoInject(mode: RagAutoInject, checkpoint: string): boolean {
   return size === null || size <= AUTOINJECT_AUTO_MAX_SIZE_B;
 }
 
+/** Project sources in the emitted rag_scope are always pre-retrieved so the
+ * Search pill cannot block grounding. Exclusive KB scopes keep the user's
+ * Auto-retrieve setting: they send kb_id only, not project_id. */
+function resolveRagAutoinject(
+  mode: RagAutoInject,
+  checkpoint: string,
+  projectInScope: boolean,
+): boolean {
+  if (projectInScope) return true;
+  return resolveAutoInject(mode, checkpoint);
+}
+
 /** Server-side usage data from llama-server (via stream_options.include_usage). */
 interface ServerUsage {
   prompt_tokens: number;
@@ -4242,7 +4254,11 @@ export function createOpenAIStreamAdapter(
                   kb_id: runtime.ragSource.kbId,
                   default_top_k: runtime.ragTopK,
                   mode: runtime.ragMode,
-                  autoinject: runtime.ragAutoInject,
+                  autoinject: resolveRagAutoinject(
+                    runtime.ragAutoInject,
+                    params.checkpoint,
+                    false,
+                  ),
                   autoinject_min_score: runtime.ragAutoInjectMinScore,
                 }
               : {
@@ -4254,7 +4270,11 @@ export function createOpenAIStreamAdapter(
                     : {}),
                   default_top_k: runtime.ragTopK,
                   mode: runtime.ragMode,
-                  autoinject: runtime.ragAutoInject,
+                  autoinject: resolveRagAutoinject(
+                    runtime.ragAutoInject,
+                    params.checkpoint,
+                    Boolean(projectRagEnabled && researchProjectId),
+                  ),
                   autoinject_min_score: runtime.ragAutoInjectMinScore,
                 }
             : undefined;
@@ -5823,9 +5843,14 @@ export function createOpenAIStreamAdapter(
                                 }),
                             default_top_k: ragTopK,
                             mode: ragMode,
-                            autoinject: resolveAutoInject(
+                            autoinject: resolveRagAutoinject(
                               ragAutoInject,
                               params.checkpoint,
+                              Boolean(
+                                projectRagEnabled &&
+                                  ragProjectId &&
+                                  !(ragEnabled && ragSource.type === "kb"),
+                              ),
                             ),
                             autoinject_min_score: ragAutoInjectMinScore,
                             ...(ragAutoInject === "off"
@@ -6044,9 +6069,14 @@ export function createOpenAIStreamAdapter(
                               }),
                           default_top_k: ragTopK,
                           mode: ragMode,
-                          autoinject: resolveAutoInject(
+                          autoinject: resolveRagAutoinject(
                             ragAutoInject,
                             params.checkpoint,
+                            Boolean(
+                              projectRagEnabled &&
+                                ragProjectId &&
+                                !(ragEnabled && ragSource.type === "kb"),
+                            ),
                           ),
                           autoinject_min_score: ragAutoInjectMinScore,
 

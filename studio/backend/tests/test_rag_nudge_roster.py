@@ -239,6 +239,9 @@ def test_roster_bounds_the_whole_list_by_bytes(rag_conn):
         _doc(rag_conn, "project_p1", f"d{i}", f"{name}{i:03d}.pdf")
     out = _nudge({"project_id": "p1"})
     roster = out[out.index("The attached documents are") :]
+    closed = inference._RAG_CLOSED_CORPUS_NUDGE
+    if roster.endswith(closed):
+        roster = roster[: -len(closed)].rstrip()
     assert len(roster.encode("utf-8")) < inference._RAG_ROSTER_MAX_BYTES + 400
     assert ", and " in roster
 
@@ -257,7 +260,9 @@ def test_no_documents_leaves_nudge_unchanged(rag_conn):
 
     out = _nudge({"project_id": "p1"}, base = BASE)
     assert "The attached documents are:" not in out
-    assert out == BASE + " " + inference._RAG_GROUNDING_NUDGE
+    assert out == (
+        BASE + " " + inference._RAG_GROUNDING_NUDGE + " " + inference._RAG_CLOSED_CORPUS_NUDGE
+    )
 
 
 def test_roster_appends_to_a_non_empty_tool_nudge(rag_conn):

@@ -11172,9 +11172,17 @@ def build_rag_autoinject(conversation: list[dict], rag_scope: dict | None) -> di
     if enabled is None:
         enabled = _autoinject_enabled()
     thread_id = rag_scope.get("thread_id")
+    project_id = rag_scope.get("project_id")
     whole_doc_requested = (
         bool(thread_id) and not rag_scope.get("kb_id") and _thread_whole_doc_enabled(rag_scope)
     )
+    # Project-only scopes always pre-retrieve: the Search pill only gates
+    # web_search, so grounding must not depend on the model calling the tool or
+    # on the user's autoinject setting. A thread attachment keeps the caller's
+    # autoinject flag so the whole-doc fallback (thread first, then project
+    # companion) still runs instead of a combined search.
+    if project_id and not rag_scope.get("kb_id") and not thread_id:
+        enabled = True
     if not enabled and not whole_doc_requested:
         return None
     query = _last_user_text(conversation)
