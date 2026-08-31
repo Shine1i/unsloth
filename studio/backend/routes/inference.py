@@ -4370,11 +4370,35 @@ def _build_tool_action_nudge(
 # Nudge appended when the RAG knowledge-base tool is active: ground answers in
 # the attached documents instead of model memory.
 _RAG_GROUNDING_NUDGE = (
-    "The user has attached documents to this conversation. Relevant "
-    "passages are retrieved and provided to you automatically; base "
-    "your answer on them and cite them. You can also call "
-    "search_knowledge_base to look for more. Do not answer from "
-    "memory when the attached documents are relevant."
+    "The user has attached documents to this conversation. For questions about "
+    "those documents, call search_knowledge_base before answering. Relevant "
+    "passages may also be retrieved and provided to you automatically; base "
+    "your answer on them and cite them. Do not answer from memory when the "
+    "attached documents are relevant."
+)
+# When built-in internet tools are absent, keep document answers grounded without
+# contradicting a different enabled tool that the user explicitly requested.
+_RAG_CLOSED_CORPUS_NUDGE = (
+    "When the user asks about the attached documents, treat those documents as "
+    "the primary corpus. If that document information is not in "
+    "search_knowledge_base results or injected passages, say it is not "
+    "available in the attached documents rather than inventing facts or "
+    "substituting public-web knowledge. Do not call the unavailable web_search "
+    "tool. If the user explicitly requests another enabled tool, follow that "
+    "request. For questions that are not about the attached documents, answer "
+    "normally from your own capabilities."
+)
+# Built-in tools that reach the public web.
+_RAG_INTERNET_TOOL_NAMES = frozenset({"web_search", "deep_research"})
+
+# When both RAG and web_search are enabled (e.g. the Search pill is on), project
+# sources must still win over an automatic web fallback.
+_RAG_WEB_SEARCH_PRIORITY_NUDGE = (
+    "When both document search and web_search are available, search the "
+    "attached documents with search_knowledge_base first. Use web_search only "
+    "when the user explicitly asks for current events, live data, or "
+    "information outside the attached documents—not as an automatic fallback "
+    "when a document search finds no match."
 )
 
 _RAG_ROSTER_MAX_NAMES = 40
@@ -4903,11 +4927,22 @@ def _apply_compaction_nudge(
 async def _apply_rag_nudge(nudge: str, tools: list[dict], *, rag_scope) -> str:
     """Append the RAG grounding nudge to ``nudge`` when the knowledge-base tool
     is active (search_knowledge_base present and a retrieval scope is set).
+
+    When no built-in internet tool is present, adds guidance against inventing or
+    substituting public-web knowledge while preserving explicitly requested tools. When
+    ``web_search`` is present and a project scope is set, tells the model not
+    to treat web_search as an automatic fallback after an empty document search.
+
     Returns ``nudge`` unchanged when RAG isn't active."""
     tool_names = {(t.get("function") or {}).get("name") for t in (tools or [])}
     if "search_knowledge_base" not in tool_names or not rag_scope:
         return nudge
     grounding = _RAG_GROUNDING_NUDGE + await _rag_roster_sentence(rag_scope)
+    has_internet_tool = bool(tool_names & _RAG_INTERNET_TOOL_NAMES)
+    if not has_internet_tool:
+        grounding = grounding + " " + _RAG_CLOSED_CORPUS_NUDGE
+    elif "web_search" in tool_names and rag_scope.get("project_id"):
+        grounding = grounding + " " + _RAG_WEB_SEARCH_PRIORITY_NUDGE
     if not nudge:
         return grounding
     return nudge + " " + grounding
@@ -18619,16 +18654,21 @@ async def _proxy_to_external_provider(
             # Only the Full access sentence is added: the path has never carried
             # the general tool nudge, and widening it would change every
             # non-Full-access Codex run as a side effect.
+            _codex_nudge = ""
             if payload.bypass_permissions:
-                _codex_full_access_nudge = _build_tool_action_nudge(
+                _codex_nudge = _build_tool_action_nudge(
                     tools = studio_tool_payloads,
                     model_name = model,
                     full_access = True,
                     full_access_only = True,
                 )
-                chat_messages = _append_to_codex_instructions(
-                    chat_messages, _codex_full_access_nudge
-                )
+            _codex_nudge = await _apply_rag_nudge(
+                _codex_nudge,
+                studio_tool_payloads,
+                rag_scope = payload.rag_scope,
+            )
+            if _codex_nudge:
+                chat_messages = _append_to_codex_instructions(chat_messages, _codex_nudge)
         chat_messages = _prepend_current_date_to_messages(
             chat_messages,
             request,
@@ -18932,14 +18972,24 @@ async def _proxy_to_external_provider(
         request,
         include_api_key = run_studio_tool_loop,
     )
-    if run_studio_tool_loop and payload.bypass_permissions:
+    if run_studio_tool_loop:
         # Full access disables the sandbox at execution time, so the schemas must
         # say so too rather than describing a sandbox the model will not get.
-        _external_nudge = _build_tool_action_nudge(
-            tools = external_studio_tools,
-            model_name = model,
-            full_access = True,
-            full_access_only = True,
+        _external_nudge = ""
+        if payload.bypass_permissions:
+            _external_nudge = _build_tool_action_nudge(
+                tools = external_studio_tools,
+                model_name = model,
+                full_access = True,
+                full_access_only = True,
+            )
+        # Same RAG guidance the local GGUF/safetensors loops apply: Search off
+        # is a closed corpus for document questions, and Search on still prefers
+        # project sources over an automatic web fallback.
+        _external_nudge = await _apply_rag_nudge(
+            _external_nudge,
+            external_studio_tools,
+            rag_scope = payload.rag_scope,
         )
         if _external_nudge:
             chat_messages = _append_to_system_message(chat_messages, _external_nudge)
@@ -22295,6 +22345,7 @@ async def produce_openai_chat_completions(
                 enable_thinking = payload.enable_thinking,
                 reasoning_effort = payload.reasoning_effort,
                 preserve_thinking = payload.preserve_thinking,
+                tool_choice = payload.tool_choice,
                 continue_final_message = _continue_final_message(payload),
                 auto_heal_tool_calls = _sf_auto_heal_tool_calls,
                 nudge_tool_calls = payload.nudge_tool_calls,
