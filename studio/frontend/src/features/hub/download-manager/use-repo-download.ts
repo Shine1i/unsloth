@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useLatestRef } from "../hooks/use-latest-ref";
 import type { ResolvedTransport } from "./constants";
@@ -119,8 +119,21 @@ export function useRepoDownload(config: RepoDownloadConfig): DownloadJob {
     (state) => state.conflicts[conflictKey]?.info ?? null,
   );
 
+  // Chat and Video staging park this hook on an idle repo id when the queue
+  // clears. That is not leaving the download surface, so skip cancel there or
+  // Hub never sees the banner. A real unmount or a switch to another repo
+  // still clears: the ref already holds the next id when this cleanup runs.
+  const repoIdRef = useRef(repoId);
+  repoIdRef.current = repoId;
   useEffect(
     () => () => {
+      const parked = repoIdRef.current;
+      if (
+        parked === "__staged_download_idle__" ||
+        parked === "__hub_autoload_idle__"
+      ) {
+        return;
+      }
       downloadManager.cancelConflict(conflictKey);
     },
     [conflictKey],
