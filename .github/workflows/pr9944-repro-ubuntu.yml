@@ -6,6 +6,11 @@ on:
   push:
     branches:
       - "pr-9944-trainer-kwarg-repro-ci-*"
+    paths:
+      - ".github/repro/pr9944_wrapper_probe.py"
+      - ".github/workflows/pr9944-repro-*.yml"
+      - "tests/test_warnings_issued_guard.py"
+      - "unsloth/trainer.py"
   workflow_dispatch:
 
 permissions:
