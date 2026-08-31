@@ -105,7 +105,10 @@ jobs:
             trl_spec: "__from_pyproject__"
     name: "Core (${{ matrix.combo.label }})"
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    # Fork staging needs enough headroom for the full unsloth_zoo suite on the
+    # slower hosted runners; the upstream 35-minute cap cancelled all cells
+    # mid-test without producing a pass/fail result for PR #9944.
+    timeout-minutes: 60
     # No job-level or per-step `continue-on-error`. Earlier iterations
     # masked real test failures behind green check icons; that lie is
     # gone. A failing test step fails the cell. NEEDS_PRECONDITION in
