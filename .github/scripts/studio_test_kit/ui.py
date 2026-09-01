@@ -65,6 +65,8 @@ async def open_chat(
     transcode_mp4: bool = False,
     viewport: tuple[int, int] = (1440, 900),
     headless: bool = True,
+
+    browser_name: str = "chromium",
     slow_mo_ms: int = 0,
 ) -> AsyncIterator[StudioPage]:
     """Launch headless Chromium, seed init scripts, open `/chat`.
@@ -96,7 +98,10 @@ async def open_chat(
     # happens unconditionally.
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=headless, slow_mo=slow_mo_ms)
+            browser_type = getattr(p, browser_name, None)
+            if browser_type is None:
+                raise ValueError(f"unsupported Playwright browser: {browser_name}")
+            browser = await browser_type.launch(headless=headless, slow_mo=slow_mo_ms)
             kw: dict = {"viewport": {"width": viewport[0], "height": viewport[1]}}
             if video_dir is not None:
                 video_dir.mkdir(parents=True, exist_ok=True)
