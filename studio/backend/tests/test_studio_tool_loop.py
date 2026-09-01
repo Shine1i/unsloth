@@ -457,13 +457,46 @@ def test_structured_call_makes_the_healer_dormant(executed):
 # ── Budget ────────────────────────────────────────────────────────
 
 
-def test_zero_budget_withdraws_the_catalog(executed):
+def test_zero_budget_withdraws_the_catalog_and_skips_rag(executed, monkeypatch):
+    def fail_autoinject(*_args, **_kwargs):
+        raise AssertionError("zero tool budget must prevent RAG retrieval")
+
+    monkeypatch.setattr(loop_mod, "build_rag_autoinject", fail_autoinject)
     transport = FakeTransport([[_sse({"content": "no tools for me"}), _sse(finish = "stop"), _DONE]])
-    _run(transport, max_calls = 0)
+    _run(
+        transport,
+        tools = [_tool("search_knowledge_base")],
+        max_calls = 0,
+        rag_scope = {"project_id": "p1", "autoinject": False},
+    )
 
     assert executed == []
     assert transport.requests[0]["tools"] is None
     assert transport.requests[0]["tool_choice"] == "none"
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "tools"),
+    [
+        pytest.param("none", [WEB], id = "tool_choice_none"),
+        pytest.param(None, [WEB], id = "rag_tool_not_selected"),
+    ],
+)
+def test_autoinject_honors_request_tool_constraints(executed, monkeypatch, tool_choice, tools):
+    def fail_autoinject(*_args, **_kwargs):
+        raise AssertionError("request constraints must prevent RAG retrieval")
+
+    monkeypatch.setattr(loop_mod, "build_rag_autoinject", fail_autoinject)
+    transport = FakeTransport([[_sse({"content": "plain answer"}), _sse(finish = "stop"), _DONE]])
+    lines = _run(
+        transport,
+        tools = tools,
+        tool_choice = tool_choice,
+        rag_scope = {"project_id": "p1", "autoinject": False},
+    )
+
+    assert executed == []
+    assert "plain answer" in _visible_text(lines)
 
 
 def test_denied_call_does_not_spend_an_iteration(executed, monkeypatch):
