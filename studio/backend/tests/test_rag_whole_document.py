@@ -746,6 +746,10 @@ def test_build_rag_autoinject_args_carry_user_query(rag_conn):
     assert args["query"] == "what is in here"
 
 
+# The project-scope autoinject cases live in test_rag_nudge_coupling.py, next to the
+# rest of the #9947 regressions, rather than being duplicated here.
+
+
 # ── end-to-end: real ingestion pipeline -> whole-doc injection ────────
 
 

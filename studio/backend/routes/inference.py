@@ -4432,11 +4432,35 @@ def _build_tool_action_nudge(
 # Nudge appended when the RAG knowledge-base tool is active: ground answers in
 # the attached documents instead of model memory.
 _RAG_GROUNDING_NUDGE = (
-    "The user has attached documents to this conversation. Relevant "
-    "passages are retrieved and provided to you automatically; base "
-    "your answer on them and cite them. You can also call "
-    "search_knowledge_base to look for more. Do not answer from "
-    "memory when the attached documents are relevant."
+    "The user has attached documents to this conversation. For questions about "
+    "those documents, call search_knowledge_base before answering. Relevant "
+    "passages may also be retrieved and provided to you automatically; base "
+    "your answer on them and cite them. Do not answer from memory when the "
+    "attached documents are relevant."
+)
+# When built-in internet tools are absent, keep document answers grounded without
+# contradicting a different enabled tool that the user explicitly requested.
+_RAG_CLOSED_CORPUS_NUDGE = (
+    "When the user asks about the attached documents, treat those documents as "
+    "the primary corpus. If that document information is not in "
+    "search_knowledge_base results or injected passages, say it is not "
+    "available in the attached documents rather than inventing facts or "
+    "substituting public-web knowledge. Do not call the unavailable web_search "
+    "tool. If the user explicitly requests another enabled tool, follow that "
+    "request. For questions that are not about the attached documents, answer "
+    "normally from your own capabilities."
+)
+# Built-in tools that reach the public web.
+_RAG_INTERNET_TOOL_NAMES = frozenset({"web_search", "deep_research"})
+
+# When both RAG and web_search are enabled (e.g. the Search pill is on), project
+# sources must still win over an automatic web fallback.
+_RAG_WEB_SEARCH_PRIORITY_NUDGE = (
+    "When both document search and web_search are available, use "
+    "search_knowledge_base first for questions about the attached documents. "
+    "Use web_search directly when the user explicitly asks for current events, "
+    "live data, or information outside the attached documents. Do not use "
+    "web_search as an automatic fallback when a document search finds no match."
 )
 
 _RAG_ROSTER_MAX_NAMES = 40
@@ -4576,7 +4600,9 @@ def _roster_name(raw: object) -> str:
     return name.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _read_roster(rag_scope: dict) -> tuple[list[str], int]:
+def _read_roster(
+    rag_scope: dict, *, max_bytes: int = _RAG_ROSTER_MAX_BYTES
+) -> tuple[list[str], int]:
     import sqlite3 as _sqlite3
 
     from storage import rag_db
@@ -4600,7 +4626,7 @@ def _read_roster(rag_scope: dict) -> tuple[list[str], int]:
             conn.create_function("roster_name", 1, _roster_name)
         names: list[str] = []
         seen: set[str] = set()
-        budget = _RAG_ROSTER_MAX_BYTES
+        budget = max(0, max_bytes)
         truncated = False
         for scope in scopes:
             rows = conn.execute(_ROSTER_NAMES_SQL, (scope, _RAG_ROSTER_MAX_NAMES + 1))
@@ -4632,12 +4658,12 @@ def _read_roster(rag_scope: dict) -> tuple[list[str], int]:
         conn.close()
 
 
-async def _rag_roster_sentence(rag_scope: dict) -> str:
+async def _rag_roster_sentence(rag_scope: dict, *, max_bytes: int = _RAG_ROSTER_MAX_BYTES) -> str:
     global _roster_failure_logged
     from starlette.concurrency import run_in_threadpool
 
     try:
-        names, total = await run_in_threadpool(_read_roster, rag_scope)
+        names, total = await run_in_threadpool(_read_roster, rag_scope, max_bytes = max_bytes)
     except Exception as exc:  # noqa: BLE001
         if not _roster_failure_logged:
             _roster_failure_logged = True
@@ -4962,14 +4988,57 @@ def _apply_compaction_nudge(
     return nudge + " " + text
 
 
-async def _apply_rag_nudge(nudge: str, tools: list[dict], *, rag_scope) -> str:
+async def _apply_rag_nudge(
+    nudge: str,
+    tools: list[dict],
+    *,
+    rag_scope,
+    tool_choice = None,
+    max_tool_calls = None,
+) -> str:
     """Append the RAG grounding nudge to ``nudge`` when the knowledge-base tool
     is active (search_knowledge_base present and a retrieval scope is set).
-    Returns ``nudge`` unchanged when RAG isn't active."""
+
+    When no built-in internet tool is present, adds guidance against inventing or
+    substituting public-web knowledge while preserving explicitly requested tools. When
+    ``web_search`` is present, tells the model not to treat it as an automatic fallback
+    after an empty document search -- for every retrieval scope, since a thread
+    attachment and a selected knowledge base are closed corpora in exactly the way a
+    project is.
+
+    Whichever of the two applies is priced against the roster's byte budget before the
+    roster is read, so the assembled instruction stays inside the envelope
+    `_RAG_ROSTER_MAX_BYTES` was chosen to hold. Growing the fixed text shortens the file
+    list rather than the model's context.
+
+    Returns ``nudge`` unchanged when RAG isn't active or the caller disabled tools."""
+    from core.inference.chat_template_helpers import forced_tool_name
+
     tool_names = {(t.get("function") or {}).get("name") for t in (tools or [])}
-    if "search_knowledge_base" not in tool_names or not rag_scope:
+    forced_name = forced_tool_name(tool_choice)
+    if (
+        max_tool_calls == 0
+        or tool_choice == "none"
+        or (forced_name and forced_name != "search_knowledge_base")
+        or "search_knowledge_base" not in tool_names
+        or not rag_scope
+    ):
         return nudge
-    grounding = _RAG_GROUNDING_NUDGE + await _rag_roster_sentence(rag_scope)
+    has_internet_tool = bool(tool_names & _RAG_INTERNET_TOOL_NAMES)
+    conditional = ""
+    if not has_internet_tool:
+        conditional = _RAG_CLOSED_CORPUS_NUDGE
+    elif "web_search" in tool_names:
+        conditional = _RAG_WEB_SEARCH_PRIORITY_NUDGE
+    roster_budget = _RAG_ROSTER_MAX_BYTES
+    if conditional:
+        roster_budget = max(0, roster_budget - len((" " + conditional).encode("utf-8")))
+    grounding = _RAG_GROUNDING_NUDGE + await _rag_roster_sentence(
+        rag_scope,
+        max_bytes = roster_budget,
+    )
+    if conditional:
+        grounding = grounding + " " + conditional
     if not nudge:
         return grounding
     return nudge + " " + grounding
@@ -18749,16 +18818,23 @@ async def _proxy_to_external_provider(
             # Only the Full access sentence is added: the path has never carried
             # the general tool nudge, and widening it would change every
             # non-Full-access Codex run as a side effect.
+            _codex_nudge = ""
             if payload.bypass_permissions:
-                _codex_full_access_nudge = _build_tool_action_nudge(
+                _codex_nudge = _build_tool_action_nudge(
                     tools = studio_tool_payloads,
                     model_name = model,
                     full_access = True,
                     full_access_only = True,
                 )
-                chat_messages = _append_to_codex_instructions(
-                    chat_messages, _codex_full_access_nudge
-                )
+            _codex_nudge = await _apply_rag_nudge(
+                _codex_nudge,
+                studio_tool_payloads,
+                rag_scope = payload.rag_scope,
+                tool_choice = payload.tool_choice,
+                max_tool_calls = payload.max_tool_calls_per_message,
+            )
+            if _codex_nudge:
+                chat_messages = _append_to_codex_instructions(chat_messages, _codex_nudge)
         chat_messages = _prepend_current_date_to_messages(
             chat_messages,
             request,
@@ -19062,14 +19138,26 @@ async def _proxy_to_external_provider(
         request,
         include_api_key = run_studio_tool_loop,
     )
-    if run_studio_tool_loop and payload.bypass_permissions:
+    if run_studio_tool_loop:
         # Full access disables the sandbox at execution time, so the schemas must
         # say so too rather than describing a sandbox the model will not get.
-        _external_nudge = _build_tool_action_nudge(
-            tools = external_studio_tools,
-            model_name = model,
-            full_access = True,
-            full_access_only = True,
+        _external_nudge = ""
+        if payload.bypass_permissions:
+            _external_nudge = _build_tool_action_nudge(
+                tools = external_studio_tools,
+                model_name = model,
+                full_access = True,
+                full_access_only = True,
+            )
+        # Same RAG guidance the local GGUF/safetensors loops apply: Search off
+        # is a closed corpus for document questions, and Search on still prefers
+        # project sources over an automatic web fallback.
+        _external_nudge = await _apply_rag_nudge(
+            _external_nudge,
+            external_studio_tools,
+            rag_scope = payload.rag_scope,
+            tool_choice = payload.tool_choice,
+            max_tool_calls = payload.max_tool_calls_per_message,
         )
         if _external_nudge:
             chat_messages = _append_to_system_message(chat_messages, _external_nudge)
@@ -20640,7 +20728,13 @@ async def produce_openai_chat_completions(
             )
 
             # Nudge the model to ground in attached documents instead of memory.
-            _nudge = await _apply_rag_nudge(_nudge, tools_to_use, rag_scope = payload.rag_scope)
+            _nudge = await _apply_rag_nudge(
+                _nudge,
+                tools_to_use,
+                rag_scope = payload.rag_scope,
+                tool_choice = payload.tool_choice,
+                max_tool_calls = payload.max_tool_calls_per_message,
+            )
             # This path fits through `_fit_context`, the only fit that can reset the epoch,
             # and only when the request asked for truncation. Otherwise the checkpoint half
             # of the nudge would describe a reset that cannot happen.
@@ -22342,17 +22436,25 @@ async def produce_openai_chat_completions(
                     param = "confirm_tool_calls",
                 ),
             )
+        _sf_prompt_tools = [] if payload.tool_choice == "none" else _sf_tools_to_use
+
         _sf_nudge = _build_tool_action_nudge(
-            tools = _sf_tools_to_use,
+            tools = _sf_prompt_tools,
             model_name = model_name,
             full_access = bool(payload.bypass_permissions),
         )
 
         # RAG nudge, mirroring the GGUF path.
-        _sf_nudge = await _apply_rag_nudge(_sf_nudge, _sf_tools_to_use, rag_scope = payload.rag_scope)
+        _sf_nudge = await _apply_rag_nudge(
+            _sf_nudge,
+            _sf_prompt_tools,
+            rag_scope = payload.rag_scope,
+            tool_choice = payload.tool_choice,
+            max_tool_calls = payload.max_tool_calls_per_message,
+        )
         # No `checkpoint_fitted`: this path never calls `fit_checkpoint_context`, so there
         # is no reset and no carried_forward block to describe.
-        _sf_nudge = _apply_compaction_nudge(_sf_nudge, _sf_tools_to_use)
+        _sf_nudge = _apply_compaction_nudge(_sf_nudge, _sf_prompt_tools)
 
         _sf_system_prompt = _apply_current_date_prompt(
             system_prompt,
@@ -22418,6 +22520,7 @@ async def produce_openai_chat_completions(
                 enable_thinking = payload.enable_thinking,
                 reasoning_effort = payload.reasoning_effort,
                 preserve_thinking = payload.preserve_thinking,
+                tool_choice = payload.tool_choice,
                 continue_final_message = _continue_final_message(payload),
                 auto_heal_tool_calls = _sf_auto_heal_tool_calls,
                 nudge_tool_calls = payload.nudge_tool_calls,
@@ -27673,6 +27776,11 @@ async def chat_count_tokens(
                 ),
                 tools_to_use,
                 rag_scope = payload.rag_scope,
+                # ChatCountTokensRequest has no tool_choice field, so read it defensively:
+                # the attribute access raised AttributeError and 500'd every count that
+                # reached the RAG branch.
+                tool_choice = getattr(payload, "tool_choice", None),
+                max_tool_calls = getattr(payload, "max_tool_calls_per_message", None),
             )
             openai_messages = _append_to_system_message(openai_messages, _count_nudge)
 

@@ -386,6 +386,43 @@ class _ToolLoopBackend(_ScriptedBackend):
         yield {"type": "content", "text": "done"}
 
 
+def test_studio_tool_choice_none_reaches_safetensors_tool_loop(monkeypatch):
+    backend = _ToolLoopBackend(_fixed("done"))
+    payload = _request(
+        enable_tools = True,
+        enabled_tools = ["search_knowledge_base"],
+        tool_choice = "none",
+        rag_scope = {"project_id": "p1", "autoinject": False},
+        stream = False,
+    )
+
+    _json_body(_call(payload, monkeypatch, backend))
+
+    assert [tool["function"]["name"] for tool in backend.calls[0]["tools"]] == [
+        "search_knowledge_base"
+    ]
+    assert backend.calls[0]["tool_choice"] == "none"
+    assert "call search_knowledge_base before answering" not in backend.calls[0]["system_prompt"]
+
+    assert "Tools are available when" not in backend.calls[0]["system_prompt"]
+
+
+def test_studio_tool_choice_none_suppresses_tool_action_nudge(monkeypatch):
+    backend = _ToolLoopBackend(_fixed("done"))
+    payload = _request(
+        enable_tools = True,
+        enabled_tools = ["web_search"],
+        tool_choice = "none",
+        stream = False,
+    )
+
+    _json_body(_call(payload, monkeypatch, backend))
+
+    assert [tool["function"]["name"] for tool in backend.calls[0]["tools"]] == ["web_search"]
+    assert backend.calls[0]["tool_choice"] == "none"
+    assert "Tools are available when" not in backend.calls[0]["system_prompt"]
+
+
 @pytest.mark.parametrize(
     "kind, stream, expected",
     [

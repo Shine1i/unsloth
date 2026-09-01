@@ -1,0 +1,50 @@
+name: "staging-9981 final cross-platform"
+on:
+  push:
+    branches: ["pr-9981-mimir-final-3196-20260901t080514z-ci"]
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      UNSLOTH_COMPILE_DISABLE: "1"
+      UNSLOTH_IS_PRESENT: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Install focused dependencies
+        run: python -m pip install -r studio/backend/requirements/studio.txt pytest pytest-asyncio pytest-timeout python-multipart sqlite-vec transformers
+      - name: Backend RAG and tool-loop regressions
+        run: >-
+          PYTHONPATH=studio/backend python -m pytest
+          studio/backend/tests/test_llama_cpp_tool_loop.py
+          studio/backend/tests/test_rag_nudge_coupling.py
+          studio/backend/tests/test_rag_nudge_roster.py
+          studio/backend/tests/test_rag_whole_document.py
+          studio/backend/tests/test_safetensors_tool_loop.py
+          studio/backend/tests/test_sf_client_tools_passthrough.py
+          studio/backend/tests/test_studio_tool_loop.py
+          -q --tb=short
+          -k 'not llama_cpp_load_progress_live and not TestGpuAutoSelection and not TestPreSpawnGpuResolution and not TestPerGpuFitGuardAllCounts and not TestTransformersIntrospection and not test_returns_cuda_when_cuda_available and not test_calls_cuda_cache_when_cuda'
+      - name: Frontend RAG request-policy regressions
+        run: npx --yes --package=tsx tsx --test studio/frontend/tests/rag-web-search-coupling.test.ts
