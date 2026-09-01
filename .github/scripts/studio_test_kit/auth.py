@@ -37,6 +37,8 @@ class StudioAuth:
     refresh_token: str
     base_url: str
 
+    must_change_password: bool = False
+
 
 @dataclass
 class ProviderSeed:
@@ -79,6 +81,8 @@ async def login(base_url: str, username: str, password: str, timeout: float = 15
             access_token=b["access_token"],
             refresh_token=b.get("refresh_token", ""),
             base_url=base_url,
+
+            must_change_password=bool(b.get("must_change_password", False)),
         )
 
 
