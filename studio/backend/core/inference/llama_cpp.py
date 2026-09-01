@@ -16342,6 +16342,51 @@ class LlamaCppBackend:
             for line in lines
         )
 
+    @classmethod
+    def _spec_start_failure_reason(cls, output: str, *, auto_selected: bool) -> str:
+        """Classify a failed speculative startup without confusing VRAM with support.
+
+        llama.cpp cannot size a borrowed-embedding MTP head by itself. Its fitter then
+        fills VRAM with the target and the real, target-coupled drafter load OOMs. That
+        exact sequence is an Auto placement downgrade, not evidence that the runtime
+        cannot execute MTP. Keep forced modes on the generic runtime-error path.
+        """
+        text = (output or "").lower()
+        if "unknown model architecture" in text:
+            return "binary_outdated"
+        if not auto_selected:
+            return "runtime_error"
+
+        lines = text.splitlines()
+
+        def _next_line(marker: str, start: int = 0) -> Optional[int]:
+            return next((i for i in range(start, len(lines)) if marker in lines[i]), None)
+
+        borrowed_at = _next_line("borrow_shared_tensor")
+        shared_weight_at = (
+            _next_line("token_embd.weight", borrowed_at)
+            if borrowed_at is not None
+            else None
+        )
+        omitted_at = (
+            _next_line("failed to measure the memory of the extra model", shared_weight_at + 1)
+            if shared_weight_at is not None
+            else None
+        )
+        draft_load_at = (
+            _next_line("loading draft model", omitted_at + 1) if omitted_at is not None else None
+        )
+        draft_failure_at = (
+            _next_line("failed to load draft model", draft_load_at + 1)
+            if draft_load_at is not None
+            else None
+        )
+        if draft_load_at is not None and draft_failure_at is not None:
+            draft_load_output = "\n".join(lines[draft_load_at : draft_failure_at + 1])
+            if cls._is_gpu_memory_start_failure(draft_load_output):
+                return "drafter_no_vram"
+        return "runtime_error"
+
     @staticmethod
     def _is_projector_incompatibility(output: str) -> bool:
         """True when llama-server aborted because it cannot load the model's
@@ -23694,34 +23739,44 @@ class LlamaCppBackend:
                     and not _load_cancelled()
                 ):
                     _spec_cpu_replay_cmd = list(_last_spawn_cmd)
-                    # Blame the binary only when the output shows MTP itself
-                    # failing (unknown arch / draft or context build); an
-                    # unrelated crash (e.g. OOM) gets a neutral message.
+                    # A borrowed shared head cannot be measured independently. When llama.cpp
+                    # explicitly says it omitted that head from fitting and the coupled load then
+                    # OOMs, Auto reached the same drafter_no_vram verdict as Studio's proactive
+                    # planner. Do not report runtime incompatibility or suggest an update. Forced
+                    # modes keep runtime_error because the user asked to take this memory risk.
                     _lo = "\n".join(self._stdout_lines).lower()
-                    # Only an unknown architecture proves the prebuilt predates
-                    # this MTP model (an update fixes it). The memory/context
-                    # build failures are generic (VRAM / ctx pressure), where an
-                    # update may not help, so classify those as runtime_error.
-                    _arch_unsupported = "unknown model architecture" in _lo
-                    if (
-                        _arch_unsupported
-                        or "failed to measure draft model memory" in _lo
-                        or "failed to measure mtp context memory" in _lo
-                        or "failed to create llama_context" in _lo
-                    ):
+                    _auto_selected_spec = (
+                        (_canonicalize_spec_mode(speculative_type) or "auto") == "auto"
+                        and not _user_mtp_via_extras
+                        and not _user_draft_via_extras
+                    )
+                    self._spec_fallback_reason = self._spec_start_failure_reason(
+                        _lo, auto_selected = _auto_selected_spec
+                    )
+                    _runtime_may_predate_drafter = any(
+                        marker in _lo
+                        for marker in (
+                            "failed to measure draft model memory",
+                            "failed to measure mtp context memory",
+                            "failed to create llama_context",
+                        )
+                    )
+                    if self._spec_fallback_reason == "drafter_no_vram":
+                        _retry_reason = (
+                            "llama.cpp omitted this shared head from VRAM fitting and then "
+                            "ran out of GPU memory loading it; Auto is retrying without the "
+                            "drafter while preserving the target context"
+                        )
+                    elif self._spec_fallback_reason == "binary_outdated" or _runtime_may_predate_drafter:
                         _retry_reason = (
                             "the prebuilt may predate it; retrying without "
                             "speculative decoding -- run `unsloth studio "
                             "update` for this drafter"
                         )
-                        self._spec_fallback_reason = (
-                            "binary_outdated" if _arch_unsupported else "runtime_error"
-                        )
                     else:
                         _retry_reason = (
                             "retrying without speculative decoding in case the drafter is the cause"
                         )
-                        self._spec_fallback_reason = "runtime_error"
                     _drafter = (
                         Path(launch_mtp_draft_path).name
                         if launch_mtp_draft_path

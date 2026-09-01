@@ -233,6 +233,60 @@ def _run_cpu_fallback_load(
     return backend, loaded, launches, fallback_sources
 
 
+_SHARED_MTP_FIT_OOM = """
+llama_model_load: error loading model: borrow_shared_tensor: this model is a draft head
+without its own 'token_embd.weight'; load it as a draft of its target model, not on its own
+operator(): failed to measure the memory of the extra model, fitting without it
+common_speculative_init_result: loading draft model 'mtp-model-shared-Q8_0.gguf'
+ggml_backend_cuda_buffer_type_alloc_buffer: cudaMalloc failed: out of memory
+common_speculative_init_result: failed to load draft model, 'mtp-model-shared-Q8_0.gguf'
+"""
+
+
+def test_a_shared_mtp_fit_oom_is_an_auto_vram_downgrade():
+    assert (
+        LlamaCppBackend._spec_start_failure_reason(_SHARED_MTP_FIT_OOM, auto_selected = True)
+        == "drafter_no_vram"
+    )
+
+
+def test_forcing_the_same_shared_mtp_keeps_the_runtime_error():
+    assert (
+        LlamaCppBackend._spec_start_failure_reason(_SHARED_MTP_FIT_OOM, auto_selected = False)
+        == "runtime_error"
+    )
+
+
+def test_a_plain_gpu_oom_is_not_blameshifted_to_the_drafter():
+    output = "ggml_backend_cuda_buffer_type_alloc_buffer: cudaMalloc failed: out of memory"
+    assert (
+        LlamaCppBackend._spec_start_failure_reason(output, auto_selected = True)
+        == "runtime_error"
+    )
+
+
+def test_unknown_architecture_takes_precedence_over_the_vram_downgrade():
+    output = _SHARED_MTP_FIT_OOM + "\nllama_model_loader: unknown model architecture"
+    assert (
+        LlamaCppBackend._spec_start_failure_reason(output, auto_selected = True)
+        == "binary_outdated"
+    )
+
+
+def test_an_earlier_target_oom_is_not_blameshifted_to_the_drafter():
+    output = """
+llama_model_load: borrow_shared_tensor: draft head lacks token_embd.weight
+operator(): failed to measure the memory of the extra model, fitting without it
+cudaMalloc failed: out of memory on GPU device 0
+common_speculative_init_result: loading draft model 'mtp-shared.gguf'
+common_speculative_init_result: failed to load draft model, 'mtp-shared.gguf'
+"""
+    assert (
+        LlamaCppBackend._spec_start_failure_reason(output, auto_selected = True)
+        == "runtime_error"
+    )
+
+
 class TestGpuInitCrashMessage:
     def _message(self, monkeypatch, backend):
         monkeypatch.setattr(
