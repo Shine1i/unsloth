@@ -1,0 +1,56 @@
+# Disposable repro workflow. Delete after validation.
+
+name: "PR 10153 real vision processor A/B"
+
+on:
+  push:
+    branches:
+      - "pr-10153-mimir-pr-10153-20260901162513-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: "Targeted repro"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: "Install exact public processor dependencies"
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check 'transformers==4.57.6' pillow sentencepiece protobuf
+
+      - name: "Materialize immutable before and after refs"
+        shell: bash
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/pr10153-before" 97e12a25e96203e218c73b4c36b9c87c6c1e2ecd
+          git worktree add --detach "$RUNNER_TEMP/pr10153-after" 75e561ea113ed8c450f1a7596d31922cef69b612
+          test "$(git -C "$RUNNER_TEMP/pr10153-before" rev-parse HEAD)" = 97e12a25e96203e218c73b4c36b9c87c6c1e2ecd
+          test "$(git -C "$RUNNER_TEMP/pr10153-after" rev-parse HEAD)" = 75e561ea113ed8c450f1a7596d31922cef69b612
+
+      - name: "Prove merge base fails on the real processor"
+        shell: bash
+        run: |
+          export HF_HOME="$RUNNER_TEMP/pr10153-hf"
+          export HF_HUB_DISABLE_TELEMETRY=1
+          python scripts/pr10153_real_processor_probe.py --source "$RUNNER_TEMP/pr10153-before" --expect attribute-error
+
+      - name: "Prove PR head preserves processor padding side"
+        shell: bash
+        run: |
+          export HF_HOME="$RUNNER_TEMP/pr10153-hf"
+          export HF_HUB_DISABLE_TELEMETRY=1
+          python scripts/pr10153_real_processor_probe.py --source "$RUNNER_TEMP/pr10153-after" --expect pass
+
