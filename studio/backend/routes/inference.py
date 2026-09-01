@@ -4265,11 +4265,11 @@ _RAG_INTERNET_TOOL_NAMES = frozenset({"web_search", "deep_research"})
 # When both RAG and web_search are enabled (e.g. the Search pill is on), project
 # sources must still win over an automatic web fallback.
 _RAG_WEB_SEARCH_PRIORITY_NUDGE = (
-    "When both document search and web_search are available, search the "
-    "attached documents with search_knowledge_base first. Use web_search only "
-    "when the user explicitly asks for current events, live data, or "
-    "information outside the attached documents—not as an automatic fallback "
-    "when a document search finds no match."
+    "When both document search and web_search are available, use "
+    "search_knowledge_base first for questions about the attached documents. "
+    "Use web_search directly when the user explicitly asks for current events, "
+    "live data, or information outside the attached documents. Do not use "
+    "web_search as an automatic fallback when a document search finds no match."
 )
 
 _RAG_ROSTER_MAX_NAMES = 40
@@ -22152,8 +22152,10 @@ async def produce_openai_chat_completions(
                     param = "confirm_tool_calls",
                 ),
             )
+        _sf_prompt_tools = [] if payload.tool_choice == "none" else _sf_tools_to_use
+
         _sf_nudge = _build_tool_action_nudge(
-            tools = _sf_tools_to_use,
+            tools = _sf_prompt_tools,
             model_name = model_name,
             full_access = bool(payload.bypass_permissions),
         )
@@ -22161,14 +22163,14 @@ async def produce_openai_chat_completions(
         # RAG nudge, mirroring the GGUF path.
         _sf_nudge = await _apply_rag_nudge(
             _sf_nudge,
-            _sf_tools_to_use,
+            _sf_prompt_tools,
             rag_scope = payload.rag_scope,
             tool_choice = payload.tool_choice,
             max_tool_calls = payload.max_tool_calls_per_message,
         )
         # No `checkpoint_fitted`: this path never calls `fit_checkpoint_context`, so there
         # is no reset and no carried_forward block to describe.
-        _sf_nudge = _apply_compaction_nudge(_sf_nudge, _sf_tools_to_use)
+        _sf_nudge = _apply_compaction_nudge(_sf_nudge, _sf_prompt_tools)
 
         _sf_system_prompt = _apply_current_date_prompt(
             system_prompt,

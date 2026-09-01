@@ -79,6 +79,9 @@ def test_rag_and_web_nudge_discourages_automatic_web_fallback(rag_scope):
     assert inference._RAG_WEB_SEARCH_PRIORITY_NUDGE in out
     assert inference._RAG_CLOSED_CORPUS_NUDGE not in out
 
+    assert "first for questions about the attached documents" in out
+    assert "Use web_search directly" in out
+
 
 def test_deep_research_skips_closed_corpus_nudge():
     out = _rag_nudge(nudge = "", tools = TOOLS_WITH_RESEARCH, rag_scope = RAG_SCOPE)

@@ -84,6 +84,17 @@ test("the adapter no longer derives a project-only auto-inject override", () => 
   );
 });
 
+test("Deep Research Off disables whole-document attachment retrieval", () => {
+  const start = SOURCE.indexOf("const ragScope =");
+  const end = SOURCE.indexOf("const threadKey", start);
+  assert.ok(start > 0 && end > start, "Deep Research RAG scope moved");
+  const scope = SOURCE.slice(start, end);
+  assert.match(
+    scope,
+    /runtime\.ragAutoInject === "off"[\s\S]*?\{ whole_doc: false \}/,
+  );
+});
+
 test("local enabled_tools still lists search_knowledge_base without web_search", () => {
   const start = SOURCE.indexOf("...(ragEnabled || projectRagEnabled");
   assert.ok(start > 0, "enabled_tools list moved");

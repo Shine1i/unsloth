@@ -4249,6 +4249,10 @@ export function createOpenAIStreamAdapter(
                     params.checkpoint,
                   ),
                   autoinject_min_score: runtime.ragAutoInjectMinScore,
+
+                  ...(runtime.ragAutoInject === "off"
+                    ? { whole_doc: false }
+                    : {}),
                 }
             : undefined;
 
