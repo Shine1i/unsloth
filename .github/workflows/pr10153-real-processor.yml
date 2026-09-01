@@ -20,7 +20,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
-
           fetch-depth: 0
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
@@ -53,4 +52,3 @@ jobs:
           export HF_HOME="$RUNNER_TEMP/pr10153-hf"
           export HF_HUB_DISABLE_TELEMETRY=1
           python scripts/pr10153_real_processor_probe.py --source "$RUNNER_TEMP/pr10153-after" --expect pass
-
