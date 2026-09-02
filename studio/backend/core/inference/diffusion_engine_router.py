@@ -29,6 +29,7 @@ from core.inference.diffusion_families import (
     DiffusionFamily,
     family_pipeline_available,
     family_sd_cpp_supported,
+    pipeline_available_family_names,
 )
 from core.inference.sd_cpp_backend import (
     _install_allowed,
@@ -311,6 +312,7 @@ def annotate_status(status: dict[str, Any]) -> dict[str, Any]:
     out = dict(status)
     out["engine"] = _active_engine_name
     out["fallback_reason"] = _fallback_reason
+    out["supported_families"] = list(pipeline_available_family_names())
     return out
 
 

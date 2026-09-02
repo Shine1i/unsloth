@@ -75,7 +75,10 @@ import {
   useModelMemory,
 } from "@/hooks/use-model-memory";
 import { useVramBudgetFraction } from "@/hooks/use-vram-budget-fraction";
-import { diffusionRouteSearch } from "@/lib/diffusion-route-search";
+import {
+  diffusionRouteSearch,
+  isPinnedDiffusionLoadId,
+} from "@/lib/diffusion-route-search";
 import { type GgufFitClass, requiredGgufMemoryGb } from "@/lib/gguf-fit";
 import { extractParamLabel } from "@/lib/model-size";
 import { toast } from "@/lib/toast";
@@ -136,6 +139,10 @@ import {
   taskPickerRowMatches,
 } from "./audio-picker-policy";
 import { FolderBrowser } from "./folder-browser";
+import {
+  isFamilyOverrideLocalCandidate,
+  localArtifactPassesOverrideGate,
+} from "./family-override-local-candidate";
 import {
   type ModelCapabilities,
   detectCapabilities,
@@ -2682,6 +2689,8 @@ export function HubModelPicker({
   task,
   catalog,
   communityModelPolicy = "none",
+  familyOverride,
+  modularFamilyOverrides,
 }: {
   models: ModelOption[];
   /** Task-runtime downloads that use a cache layout the shared Hub inventory
@@ -2714,6 +2723,8 @@ export function HubModelPicker({
    *  the unsloth rows and in search. Opt-in, since the runtime has to load an arbitrary
    *  publisher's checkpoint: true of audio, not of the curated pages. */
   communityModelPolicy?: CommunityModelPolicy;
+  familyOverride?: string;
+  modularFamilyOverrides?: readonly string[];
 }) {
   const gpu = useGpuInfo();
   const inferenceGpu = useInferenceGpuInfo();
@@ -2726,6 +2737,24 @@ export function HubModelPicker({
   const diffusionLoad = useMemo(() => {
     const tasks = task ? (typeof task === "string" ? [task] : task) : [];
     return tasks.some((entry) => DIFFUSION_TASKS.has(entry));
+  }, [task]);
+  const familyOverrideMediaKind = useMemo<"image" | "video" | null>(() => {
+    const tasks = task ? (typeof task === "string" ? [task] : task) : [];
+    if (
+      tasks.some((entry) =>
+        (VIDEO_GEN_TASKS as readonly string[]).includes(entry),
+      )
+    ) {
+      return "video";
+    }
+    if (
+      tasks.some((entry) =>
+        (IMAGE_GEN_TASKS as readonly string[]).includes(entry),
+      )
+    ) {
+      return "image";
+    }
+    return null;
   }, [task]);
   // What the backend actually holds, not the dropdown highlight, which can be a
   // staged pick. The selection alone was wrong: an image or video load evicts
@@ -3000,6 +3029,9 @@ export function HubModelPicker({
   const pickerInventory = useChatPickerInventory({
     enabled: true,
     allowedHiddenModelIds: activeCatalogArtifactIds,
+    includeOpaqueDiffusersPipelines: Boolean(
+      task && familyOverride && familyOverride !== "auto",
+    ),
   });
   const {
     cachedGguf,
@@ -3910,13 +3942,19 @@ export function HubModelPicker({
             // multi-GB download from the only list that could delete it; the row instead carries
             // a partial mark and selects with isDownloaded: false, so the click opens the
             // download rather than erroring or triggering a silent re-fetch.
-            passesTaskGate(
+            (passesTaskGate(
               c.task,
               c.repo_id,
               task,
               catalog,
               activeCatalogArtifactIds,
-            ) &&
+            ) ||
+              isFamilyOverrideLocalCandidate(
+                c,
+                familyOverride,
+                familyOverrideMediaKind,
+                modularFamilyOverrides,
+              )) &&
             // Diffusion pickers: unsloth repos plus any repo the backend can LOAD. Gate on a curated ARTIFACT (what loadSpecFor resolves), not a group-key match: a base / uncurated-quant sibling matches the group by key but dead-ends at the trust gate.
             // An unsloth repo must also be a full pipeline: the fall-through loads uncataloged rows as "pipeline", and from_pretrained on a single-file checkpoint repo fails. Curated single-file artifacts stay, since loadSpecFor carries their filename.
             (!task ||
@@ -3946,7 +3984,14 @@ export function HubModelPicker({
                 })) ||
               (catalog
                 ? artifactForRepoId(c.repo_id, catalog) !== null
-                : false)),
+                : false) ||
+              (isPinnedDiffusionLoadId(c.repo_id, c.load_id) &&
+                isFamilyOverrideLocalCandidate(
+                  c,
+                  familyOverride,
+                  familyOverrideMediaKind,
+                  modularFamilyOverrides,
+                ))),
         ),
         downloadedSort,
         loadTimes,
@@ -3959,6 +4004,9 @@ export function HubModelPicker({
       catalog,
       activeCatalogArtifactIds,
       isMac,
+      familyOverride,
+      familyOverrideMediaKind,
+      modularFamilyOverrides,
     ],
   );
   // Task-scoped loads put the whole pipeline on ONE device, so quant fit uses the device the load lands on (the lowest visible ordinal), not the multi-GPU sum or the largest card: sizing against the bigger card OOMs the smaller one. Chat keeps the sum.
@@ -3992,6 +4040,12 @@ export function HubModelPicker({
         lmStudioModels.filter(
           (m) =>
             filesystemRowsSupportedForTask(task, m.task) &&
+            localArtifactPassesOverrideGate(
+              m,
+              familyOverride,
+              familyOverrideMediaKind,
+              modularFamilyOverrides,
+            ) &&
             // The same speech gate the cached GGUF rows get: a CSM file found in LM
             // Unsloth, ./models or a scan folder is just as undecodable, and routing it to
             // Audio evicts the chat model before the row is reported unsupported.
@@ -4006,13 +4060,19 @@ export function HubModelPicker({
               taskFromGgufArch: true,
             }) &&
             // The backend tags every local model with its task for exactly this: on the Images/Video pages a chat GGUF must not be offered.
-            passesTaskGate(
+            (passesTaskGate(
               m.task,
               m.model_id ?? m.id,
               task,
               catalog,
               activeCatalogArtifactIds,
-            ) &&
+            ) ||
+              isFamilyOverrideLocalCandidate(
+                m,
+                familyOverride,
+                familyOverrideMediaKind,
+                modularFamilyOverrides,
+              )) &&
             localModelMatchesFormat(m, formatFilter) &&
             matchesLocalQuery(m),
         ),
@@ -4029,6 +4089,9 @@ export function HubModelPicker({
       task,
       catalog,
       activeCatalogArtifactIds,
+      familyOverride,
+      familyOverrideMediaKind,
+      modularFamilyOverrides,
     ],
   );
   // Local ./models entries. Chat-only Unsloth runs GGUF (any host) and MLX (Mac only), so raw checkpoints there are hidden (mirrors the cached
@@ -4039,6 +4102,12 @@ export function HubModelPicker({
         localDirModels.filter(
           (m) =>
             filesystemRowsSupportedForTask(task, m.task) &&
+            localArtifactPassesOverrideGate(
+              m,
+              familyOverride,
+              familyOverrideMediaKind,
+              modularFamilyOverrides,
+            ) &&
             // The same speech gate the cached GGUF rows get: a CSM file found in LM
             // Unsloth, ./models or a scan folder is just as undecodable, and routing it to
             // Audio evicts the chat model before the row is reported unsupported.
@@ -4052,13 +4121,19 @@ export function HubModelPicker({
               // cannot borrow an Orpheus-looking path to clear the gate.
               taskFromGgufArch: true,
             }) &&
-            passesTaskGate(
+            (passesTaskGate(
               m.task,
               m.model_id ?? m.id,
               task,
               catalog,
               activeCatalogArtifactIds,
-            ) &&
+            ) ||
+              isFamilyOverrideLocalCandidate(
+                m,
+                familyOverride,
+                familyOverrideMediaKind,
+                modularFamilyOverrides,
+              )) &&
             (!chatOnly ||
               Boolean(task) ||
               localModelIsGguf(m) ||
@@ -4081,6 +4156,9 @@ export function HubModelPicker({
       task,
       catalog,
       activeCatalogArtifactIds,
+      familyOverride,
+      familyOverrideMediaKind,
+      modularFamilyOverrides,
     ],
   );
   const sortedCustomFolderModels = useMemo(
@@ -4089,6 +4167,12 @@ export function HubModelPicker({
         customFolderModels.filter(
           (m) =>
             filesystemRowsSupportedForTask(task, m.task) &&
+            localArtifactPassesOverrideGate(
+              m,
+              familyOverride,
+              familyOverrideMediaKind,
+              modularFamilyOverrides,
+            ) &&
             // The same speech gate the cached GGUF rows get: a CSM file found in LM
             // Unsloth, ./models or a scan folder is just as undecodable, and routing it to
             // Audio evicts the chat model before the row is reported unsupported.
@@ -4102,13 +4186,19 @@ export function HubModelPicker({
               // cannot borrow an Orpheus-looking path to clear the gate.
               taskFromGgufArch: true,
             }) &&
-            passesTaskGate(
+            (passesTaskGate(
               m.task,
               m.model_id ?? m.id,
               task,
               catalog,
               activeCatalogArtifactIds,
-            ) &&
+            ) ||
+              isFamilyOverrideLocalCandidate(
+                m,
+                familyOverride,
+                familyOverrideMediaKind,
+                modularFamilyOverrides,
+              )) &&
             localModelMatchesFormat(m, formatFilter) &&
             matchesLocalQuery(m),
         ),
@@ -4125,6 +4215,9 @@ export function HubModelPicker({
       task,
       catalog,
       activeCatalogArtifactIds,
+      familyOverride,
+      familyOverrideMediaKind,
+      modularFamilyOverrides,
     ],
   );
 

@@ -123,6 +123,7 @@ from .video_families import (
     VIDEO_GENERATION_BUSY_MSG,
     VIDEO_MODEL_CHANGED_MSG,
     VIDEO_NOT_LOADED_MSG,
+    pipeline_available_video_families,
     VideoFamily,
     default_video_generation_params,
     detect_video_family,
@@ -521,6 +522,8 @@ class _VideoLoadState:
     device: str
     dtype: str
     kind: str
+    # Logical picker identity when repo_id is an exact local snapshot. Never used for loading.
+    display_repo_id: Optional[str] = None
     engine: str = "diffusers"
     # The torch ordinal this pipeline's weights were placed on, or None for an automatic pick.
     # Committed WITH the pipeline, so a load in flight never moves the resident model's card.
@@ -1285,9 +1288,7 @@ class VideoBackend:
             root = Path(repo_id).expanduser()
             # Gate on .exists() (not .is_dir()) so a local FILE picked as a pipeline is rejected too.
             indexes = (
-                ("model_index.json", "modular_model_index.json")
-                if fam.modular_workflow
-                else ("model_index.json",)
+                ("modular_model_index.json",) if fam.modular_workflow else ("model_index.json",)
             )
             if root.exists() and not (
                 root.is_dir() and any((root / name).is_file() for name in indexes)
@@ -1310,6 +1311,7 @@ class VideoBackend:
         self,
         repo_id: str,
         *,
+        display_repo_id: Optional[str] = None,
         local_files_only: bool = False,
         gguf_filename: Optional[str] = None,
         base_repo: Optional[str] = None,
@@ -1330,6 +1332,9 @@ class VideoBackend:
     ) -> dict[str, Any]:
         """Validate, then run the (slow) load on a daemon thread. Returns at once."""
         hf_token = (hf_token.strip() if isinstance(hf_token, str) else hf_token) or None
+        display_repo_id = (
+            display_repo_id.strip() if isinstance(display_repo_id, str) else display_repo_id
+        ) or None
         # Resolved ONCE, here, and carried to the worker: outside it so a bad pick is the route's
         # 400 rather than a load that dies tens of GB later, and only once so free VRAM cannot
         # re-rank the choice after the weights land. Gated on the resolved backend, since XPU /
@@ -1402,6 +1407,7 @@ class VideoBackend:
             target = self._run_load,
             kwargs = dict(
                 repo_id = repo_id,
+                display_repo_id = display_repo_id,
                 local_files_only = local_files_only,
                 gguf_filename = gguf_filename,
                 base_repo = base_repo,
@@ -1666,9 +1672,11 @@ class VideoBackend:
         token: Optional[int],
         cancel_event: threading.Event,
         repo_id: str,
+        display_repo_id: Optional[str] = None,
         gguf_filename: Optional[str] = None,
         hf_token: Optional[str] = None,
         memory_mode: Optional[str] = None,
+        family_override: Optional[str] = None,
         gpu_ordinal: Optional[int] = None,
         # NAMED, not left to the ``**_`` swallow below: an API-initiated load hands this in
         # through _run_load's kwargs, and swallowed it meant the four-file bundle, the sizing
@@ -2009,6 +2017,7 @@ class VideoBackend:
                         pipe = runtime,
                         family = fam,
                         repo_id = repo_id,
+                        display_repo_id = display_repo_id,
                         base_repo = fam.base_repo,
                         device = native_device,
                         gpu_ordinal = native_ordinal,
@@ -2026,6 +2035,13 @@ class VideoBackend:
                         attention_backend = "flash",
                         resolved = build_resolved_record(
                             {
+                                "family_override": (
+                                    family_override,
+                                    fam.name,
+                                    "detected from the model"
+                                    if family_override is None
+                                    else "requested",
+                                ),
                                 "memory_mode": (memory_mode, policy, "native model offload"),
                                 "attention_backend": (
                                     None,
@@ -3447,6 +3463,7 @@ class VideoBackend:
         self,
         repo_id: str,
         *,
+        display_repo_id: Optional[str] = None,
         local_files_only: bool = False,
         gguf_filename: Optional[str] = None,
         base_repo: Optional[str] = None,
@@ -3468,6 +3485,9 @@ class VideoBackend:
         _te_prequant_skipped: tuple[str, ...] = (),
         _h3_auto_denoiser_planned: Optional[str] = None,
     ) -> dict[str, Any]:
+        display_repo_id = (
+            display_repo_id.strip() if isinstance(display_repo_id, str) else display_repo_id
+        ) or None
         fam = self.validate_load_request(
             repo_id,
             gguf_filename = gguf_filename,
@@ -3487,9 +3507,11 @@ class VideoBackend:
                 token = _load_token,
                 cancel_event = threading.Event(),
                 repo_id = repo_id,
+                display_repo_id = display_repo_id,
                 gguf_filename = gguf_filename,
                 hf_token = hf_token,
                 memory_mode = memory_mode,
+                family_override = family_override,
                 # Carried, not defaulted: load_pipeline is also reached directly (no _run_load),
                 # and dropping it here would let an offline load fetch the four-file bundle.
                 local_files_only = local_files_only,
@@ -3548,12 +3570,14 @@ class VideoBackend:
                 fam = fam,
                 target = target,
                 repo_id = repo_id,
+                display_repo_id = display_repo_id,
                 base = base,
                 kind = kind,
                 dtype = dtype,
                 device = device,
                 hf_token = hf_token,
                 memory_mode = memory_mode,
+                family_override = family_override,
                 # RAW, not normalised. Both normalisers fold "none"/"off" into the same None an
                 # omitted request produces, and for a modular workflow those are opposite answers:
                 # unset means "pick the hosted quantized components", "none" means "keep the
@@ -4106,6 +4130,11 @@ class VideoBackend:
 
             resolved = build_resolved_record(
                 {
+                    "family_override": (
+                        family_override,
+                        fam.name,
+                        "detected from the model" if family_override is None else "requested",
+                    ),
                     "memory_mode": (
                         memory_mode,
                         plan.requested_mode,
@@ -4176,6 +4205,7 @@ class VideoBackend:
                     pipe = pipe,
                     family = fam,
                     repo_id = repo_id,
+                    display_repo_id = display_repo_id,
                     base_repo = base,
                     device = device,
                     gpu_ordinal = target.ordinal,
@@ -4279,12 +4309,14 @@ class VideoBackend:
         torch: Any,
         fam: VideoFamily,
         repo_id: str,
+        display_repo_id: Optional[str] = None,
         base: str,
         kind: str,
         dtype: Any,
         device: str,
         hf_token: Optional[str],
         memory_mode: Optional[str],
+        family_override: Optional[str] = None,
         transformer_quant: Optional[str] = None,
         text_encoder_quant: Optional[str] = None,
         speed_mode: Optional[str] = None,
@@ -4882,6 +4914,11 @@ class VideoBackend:
 
         resolved = build_resolved_record(
             {
+                "family_override": (
+                    family_override,
+                    fam.name,
+                    "detected from the model" if family_override is None else "requested",
+                ),
                 "memory_mode": (
                     memory_mode,
                     offload_policy,
@@ -4925,6 +4962,7 @@ class VideoBackend:
                 pipe = pipe,
                 family = fam,
                 repo_id = repo_id,
+                display_repo_id = display_repo_id,
                 base_repo = base,
                 device = device,
                 gpu_ordinal = umem_target.ordinal,
@@ -6341,11 +6379,19 @@ class VideoBackend:
 
     def status(self) -> dict[str, Any]:
         state = self._state
+        available_families = pipeline_available_video_families(
+            device = resolve_diffusion_device_target().device
+        )
+        supported_families = [fam.name for fam in available_families]
+        modular_families = [fam.name for fam in available_families if fam.modular_workflow]
         if state is None:
             return {
                 "loaded": False,
                 "repo_id": None,
+                "display_repo_id": None,
                 "family": None,
+                "supported_families": supported_families,
+                "modular_families": modular_families,
                 "base_repo": None,
                 "device": None,
                 "dtype": None,
@@ -6381,7 +6427,10 @@ class VideoBackend:
         return {
             "loaded": True,
             "repo_id": state.repo_id,
+            "display_repo_id": state.display_repo_id,
             "family": fam.name,
+            "supported_families": supported_families,
+            "modular_families": modular_families,
             "base_repo": state.base_repo,
             "device": state.device,
             "dtype": state.dtype,

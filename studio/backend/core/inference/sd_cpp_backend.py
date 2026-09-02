@@ -34,6 +34,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
+from core.inference.diffusion_auto_policy import build_resolved_record
 from core.inference.diffusion_compat import flux2_inner_dim_for_pick
 from core.inference.diffusion_device import (
     resolve_diffusion_device_target,
@@ -864,6 +865,8 @@ class _SdState:
     family: DiffusionFamily
     device: str
     files: SdCppModelFiles
+    # Logical picker identity when repo_id is a local cache path. Never used for loading.
+    display_repo_id: Optional[str] = None
     vae_format: Optional[str] = None
     native_speed: str = "off"
     offload_flags: tuple[str, ...] = ()
@@ -874,6 +877,8 @@ class _SdState:
     mode: str = "server"
     # Token kept so LoRA adapters selected at generate time can be fetched from the Hub.
     hf_token: Optional[str] = None
+    # Per-control provenance for the Loaded build panel and load-time control reseeding.
+    resolved: Optional[dict] = None
     # The GGUF basename this load committed: some variants pick their encoder by filename, and a local *klein-9B*.gguf carries that keyword only in the basename.
     gguf_filename: Optional[str] = None
     # The FLUX.2 inner_dim this load read out of the checkpoint's own header, when it could. Kept
@@ -1220,6 +1225,8 @@ class SdCppDiffusionBackend:
         self,
         repo_id: str,
         *,
+        # Logical picker identity when repo_id is a local cache path.
+        display_repo_id: Optional[str] = None,
         # Same name, position and default as DiffusionBackend.begin_load: the route calls whichever
         # engine was activated through ONE call site and passes this unconditionally, so an engine
         # that does not declare it TypeErrors every load on the hosts that select it (CPU-only,
@@ -1257,6 +1264,9 @@ class SdCppDiffusionBackend:
         """Validate, then fetch assets on a daemon thread. Returns at once."""
         # Empty/whitespace token = "no token"; "" verbatim breaks the anonymous fallback.
         hf_token = hf_token.strip() if hf_token and hf_token.strip() else None
+        display_repo_id = (
+            display_repo_id.strip() if isinstance(display_repo_id, str) else display_repo_id
+        ) or None
         # Same fallback the diffusers and video backends take: the route ranks the selection and
         # passes the winner, but a direct caller (an MCP client, a test, a plugin) hands over
         # gpu_ids alone, and without this the native engine is the one engine that would drop the
@@ -1339,10 +1349,12 @@ class SdCppDiffusionBackend:
             target = self._run_load,
             kwargs = dict(
                 repo_id = repo_id,
+                display_repo_id = display_repo_id,
                 local_files_only = local_files_only,
                 gguf_filename = gguf_filename,
                 base = base,
                 fam = fam,
+                family_override = family_override,
                 hf_token = hf_token,
                 cpu_offload = cpu_offload,
                 memory_mode = memory_mode,
@@ -1359,9 +1371,11 @@ class SdCppDiffusionBackend:
         self,
         *,
         repo_id: str,
+        display_repo_id: Optional[str] = None,
         gguf_filename: str,
         base: str,
         fam: DiffusionFamily,
+        family_override: Optional[str] = None,
         hf_token: Optional[str],
         # Cache-only when set: every Hub call below is either skipped or told to resolve from disk,
         # so a load nobody asked for cannot pull bytes. See begin_load for what it does not cover.
@@ -1713,6 +1727,7 @@ class SdCppDiffusionBackend:
                 )
                 state = _SdState(
                     repo_id = repo_id,
+                    display_repo_id = display_repo_id,
                     base_repo = base,
                     family = fam,
                     device = device,
@@ -1729,6 +1744,17 @@ class SdCppDiffusionBackend:
                     server = server,
                     mode = mode,
                     hf_token = hf_token,
+                    resolved = build_resolved_record(
+                        {
+                            "family_override": (
+                                family_override,
+                                fam.name,
+                                "detected from the model"
+                                if family_override is None
+                                else "requested",
+                            )
+                        }
+                    ),
                     gguf_filename = gguf_filename,
                     flux2_inner_dim = inner_dim,
                     # Only the one-shot path needs to carry it: it re-resolves sd-cli per image,
@@ -2747,6 +2773,7 @@ class SdCppDiffusionBackend:
             return {
                 "loaded": False,
                 "repo_id": None,
+                "display_repo_id": None,
                 "family": None,
                 "base_repo": None,
                 "device": None,
@@ -2762,6 +2789,7 @@ class SdCppDiffusionBackend:
                 "transformer_quant": None,
                 "attention_backend": None,
                 "transformer_cache": None,
+                "resolved": None,
                 "engine": "sd_cpp",
                 "native_mode": None,
                 "supports_lora": False,
@@ -2774,6 +2802,7 @@ class SdCppDiffusionBackend:
         return {
             "loaded": True,
             "repo_id": state.repo_id,
+            "display_repo_id": state.display_repo_id,
             "family": state.family.name,
             "base_repo": state.base_repo,
             "device": state.device,
@@ -2795,6 +2824,7 @@ class SdCppDiffusionBackend:
             "transformer_quant": None,
             "attention_backend": None,
             "transformer_cache": None,
+            "resolved": state.resolved,
             "engine": "sd_cpp",
             "supports_lora": diffusion_lora.supports_lora(
                 engine = "sd_cpp",
