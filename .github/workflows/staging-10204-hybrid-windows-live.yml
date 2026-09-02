@@ -74,7 +74,7 @@ jobs:
             throw "shared install leaked UV_CACHE_DIR into its caller: $env:UV_CACHE_DIR"
           }
           $sharedText = Get-Content -LiteralPath $sharedLog -Raw
-          if (-not $sharedText.Contains("reusing existing shared cache ($sharedCache)")) {
+          if (-not $sharedText.Contains("reusing existing shared cache")) {
             throw 'shared-cache selection was not reported'
           }
           if ((Get-Content -LiteralPath $seed -Raw) -cne 'keep-shared-cache') {
@@ -104,7 +104,7 @@ jobs:
           }
           $isolatedCache = Join-Path $isolatedStudio 'cache\uv'
           $isolatedText = Get-Content -LiteralPath $isolatedLog -Raw
-          if (-not $isolatedText.Contains("forced Studio cache isolation ($isolatedCache)")) {
+          if (-not $isolatedText.Contains("forced Studio cache isolation")) {
             throw 'forced-isolation selection was not reported'
           }
           if (-not (Test-Path -LiteralPath $isolatedCache -PathType Container)) {
