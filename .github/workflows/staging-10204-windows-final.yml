@@ -1,0 +1,104 @@
+name: "staging-10204 final Windows verification"
+
+on:
+  push:
+    branches: ["pr-10204-mimir-issue-10193-20260902t131700z-ci"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-final:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify final PR head and implementation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prHead = '043b16834ed91737d3e0c7572aac9e4425c77514'
+          & git merge-base --is-ancestor $prHead HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'PR head is not an ancestor of the staging head' }
+          & git diff --quiet $prHead -- `
+            install.ps1 `
+            install.sh `
+            tests/sh/test_install_uv_cache_root.sh `
+            tests/python/test_cross_platform_parity.py `
+            tests/python/test_windows_python_venv_hardening.py
+          if ($LASTEXITCODE -ne 0) { throw 'Staging changed the PR product or regression tree' }
+          $source = Get-Content -LiteralPath install.ps1 -Raw
+          foreach ($required in @(
+            'Set-Item -LiteralPath Env:UV_CACHE_DIR -Value $PreviousValue',
+            'Remove-Item -LiteralPath Env:UV_CACHE_DIR -ErrorAction SilentlyContinue'
+          )) {
+            if (-not $source.Contains($required)) { throw "missing staged implementation: $required" }
+          }
+          Write-Host "FACT pr_product_head=$prHead"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Run executable cache lifecycle regressions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --disable-pip-version-check pytest
+          python -m pytest -q `
+            tests/python/test_windows_python_venv_hardening.py `
+            tests/python/test_cross_platform_parity.py `
+            -k 'uv_cache or InstallUvCacheRootParity'
+          if ($LASTEXITCODE -ne 0) { throw "focused pytest exited $LASTEXITCODE" }
+      - name: Real install keeps uv cache inside Studio and restores caller
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $run = Join-Path $env:RUNNER_TEMP 'unsloth-uv-cache-live-final'
+          $studio = Join-Path $run 'studio root'
+          $homeRoot = Join-Path $run 'home'
+          $localAppData = Join-Path $homeRoot 'AppData\Local'
+          $appData = Join-Path $homeRoot 'AppData\Roaming'
+          Remove-Item -LiteralPath $run -Recurse -Force -ErrorAction SilentlyContinue
+          [System.IO.Directory]::CreateDirectory($homeRoot) | Out-Null
+          [System.IO.Directory]::CreateDirectory($localAppData) | Out-Null
+          [System.IO.Directory]::CreateDirectory($appData) | Out-Null
+
+          Remove-Item -LiteralPath Env:UV_CACHE_DIR -ErrorAction SilentlyContinue
+          if (Test-Path -LiteralPath Env:UV_CACHE_DIR) { throw 'harness did not start absent' }
+          $env:USERPROFILE = $homeRoot
+          $env:HOME = $homeRoot
+          $env:LOCALAPPDATA = $localAppData
+          $env:APPDATA = $appData
+          $env:UNSLOTH_STUDIO_HOME = $studio
+          $env:UNSLOTH_SKIP_AUTOSTART = '1'
+
+          & .\install.ps1 --local --no-torch --skip-autostart --python 3.12
+          if (-not $?) { throw 'install.ps1 returned failure' }
+          if (Test-Path -LiteralPath Env:UV_CACHE_DIR) {
+            throw "install.ps1 leaked UV_CACHE_DIR into its caller: $env:UV_CACHE_DIR"
+          }
+
+          $cache = Join-Path $studio 'cache\uv'
+          $global = Join-Path $localAppData 'uv\cache'
+          $python = Join-Path $studio 'unsloth_studio\Scripts\python.exe'
+          $cli = Join-Path $studio 'bin\unsloth.cmd'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'managed Python is missing' }
+          if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw 'managed CLI is missing' }
+          if (-not (Test-Path -LiteralPath $cache -PathType Container)) { throw 'Studio uv cache is missing' }
+          $cacheFiles = @(Get-ChildItem -LiteralPath $cache -File -Recurse -Force).Count
+          $cacheBytes = (Get-ChildItem -LiteralPath $cache -File -Recurse -Force | Measure-Object -Property Length -Sum).Sum
+          $globalFiles = if (Test-Path -LiteralPath $global -PathType Container) {
+            @(Get-ChildItem -LiteralPath $global -File -Recurse -Force).Count
+          } else { 0 }
+          if ($cacheFiles -le 0) { throw 'Studio uv cache was not populated' }
+          if ($globalFiles -ne 0) { throw "user-wide uv cache received $globalFiles files" }
+          & $cli --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "managed CLI --help exited $LASTEXITCODE" }
+          Write-Host "PASS final-windows cache_files=$cacheFiles cache_bytes=$cacheBytes global_cache_files=$globalFiles caller_uv_cache=absent"
