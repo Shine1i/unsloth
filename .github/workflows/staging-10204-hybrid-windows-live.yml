@@ -1,0 +1,128 @@
+name: "staging-10204 hybrid Windows live install"
+
+on:
+  push:
+    branches: ["pr-10204-mimir-pr-10204-hybrid-20260902t155700z-ci"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-live:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify pinned PR product head
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prHead = '7f9784fab29434133979a9a8bb458dcf616f099f'
+          & git merge-base --is-ancestor $prHead HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'PR head is not an ancestor of the staging head' }
+          foreach ($required in @(
+            'reusing existing shared cache',
+            '--isolated-uv-cache',
+            'Set-StudioUvCacheForLaunch'
+          )) {
+            if (-not (Select-String -LiteralPath install.ps1 -SimpleMatch $required -Quiet)) {
+              throw "missing staged implementation: $required"
+            }
+          }
+          Write-Host "FACT pr_product_head=$prHead"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Reuse populated cache and honor forced isolation in real installs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $run = Join-Path $env:RUNNER_TEMP 'unsloth-hybrid-uv-cache-live'
+          $homeRoot = Join-Path $run 'home'
+          $localAppData = Join-Path $homeRoot 'AppData\Local'
+          $appData = Join-Path $homeRoot 'AppData\Roaming'
+          $sharedCache = Join-Path $localAppData 'uv\cache'
+          $seed = Join-Path $sharedCache 'archive-v0\seed.txt'
+          Remove-Item -LiteralPath $run -Recurse -Force -ErrorAction SilentlyContinue
+          [System.IO.Directory]::CreateDirectory((Split-Path -Parent $seed)) | Out-Null
+          [System.IO.Directory]::CreateDirectory($appData) | Out-Null
+          [System.IO.File]::WriteAllText($seed, 'keep-shared-cache')
+
+          Remove-Item -LiteralPath Env:UV_CACHE_DIR -ErrorAction SilentlyContinue
+          $env:USERPROFILE = $homeRoot
+          $env:HOME = $homeRoot
+          $env:LOCALAPPDATA = $localAppData
+          $env:APPDATA = $appData
+          $env:UNSLOTH_SKIP_AUTOSTART = '1'
+
+          $sharedStudio = Join-Path $run 'shared studio'
+          $env:UNSLOTH_STUDIO_HOME = $sharedStudio
+          $sharedLog = Join-Path $run 'shared-install.log'
+          $sharedOutput = @(& .\install.ps1 --local --no-torch --skip-autostart --python 3.12 *>&1)
+          $sharedSucceeded = $?
+          $sharedOutput | Tee-Object -LiteralPath $sharedLog
+          if (-not $sharedSucceeded) { throw 'shared-cache install returned failure' }
+          if (Test-Path -LiteralPath Env:UV_CACHE_DIR) {
+            throw "shared install leaked UV_CACHE_DIR into its caller: $env:UV_CACHE_DIR"
+          }
+          $sharedText = Get-Content -LiteralPath $sharedLog -Raw
+          if (-not $sharedText.Contains("reusing existing shared cache ($sharedCache)")) {
+            throw 'shared-cache selection was not reported'
+          }
+          if ((Get-Content -LiteralPath $seed -Raw) -cne 'keep-shared-cache') {
+            throw 'shared-cache seed was modified'
+          }
+          $sharedFiles = @(Get-ChildItem -LiteralPath $sharedCache -File -Recurse -Force).Count
+          if ($sharedFiles -le 1) { throw 'real install did not populate the selected shared cache' }
+          $sharedCli = Join-Path $sharedStudio 'bin\unsloth.cmd'
+          if (-not (Test-Path -LiteralPath $sharedCli -PathType Leaf)) { throw 'shared managed CLI is missing' }
+          & $sharedCli --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "shared managed CLI --help exited $LASTEXITCODE" }
+
+          $sharedSnapshot = @(
+            Get-ChildItem -LiteralPath $sharedCache -File -Recurse -Force |
+              Sort-Object FullName |
+              ForEach-Object { "$(($_.FullName.Substring($sharedCache.Length)))`t$($_.Length)" }
+          ) -join "`n"
+          $isolatedStudio = Join-Path $run 'isolated studio'
+          $env:UNSLOTH_STUDIO_HOME = $isolatedStudio
+          $isolatedLog = Join-Path $run 'isolated-install.log'
+          $isolatedOutput = @(& .\install.ps1 --local --no-torch --skip-autostart --isolated-uv-cache --python 3.12 *>&1)
+          $isolatedSucceeded = $?
+          $isolatedOutput | Tee-Object -LiteralPath $isolatedLog
+          if (-not $isolatedSucceeded) { throw 'isolated-cache install returned failure' }
+          if (Test-Path -LiteralPath Env:UV_CACHE_DIR) {
+            throw "isolated install leaked UV_CACHE_DIR into its caller: $env:UV_CACHE_DIR"
+          }
+          $isolatedCache = Join-Path $isolatedStudio 'cache\uv'
+          $isolatedText = Get-Content -LiteralPath $isolatedLog -Raw
+          if (-not $isolatedText.Contains("forced Studio cache isolation ($isolatedCache)")) {
+            throw 'forced-isolation selection was not reported'
+          }
+          if (-not (Test-Path -LiteralPath $isolatedCache -PathType Container)) {
+            throw 'isolated Studio uv cache is missing'
+          }
+          $isolatedFiles = @(Get-ChildItem -LiteralPath $isolatedCache -File -Recurse -Force).Count
+          if ($isolatedFiles -le 0) { throw 'isolated Studio uv cache was not populated' }
+          $sharedAfter = @(
+            Get-ChildItem -LiteralPath $sharedCache -File -Recurse -Force |
+              Sort-Object FullName |
+              ForEach-Object { "$(($_.FullName.Substring($sharedCache.Length)))`t$($_.Length)" }
+          ) -join "`n"
+          if ($sharedAfter -cne $sharedSnapshot) {
+            throw 'forced-isolation install modified the shared cache'
+          }
+          $isolatedCli = Join-Path $isolatedStudio 'bin\unsloth.cmd'
+          if (-not (Test-Path -LiteralPath $isolatedCli -PathType Leaf)) { throw 'isolated managed CLI is missing' }
+          & $isolatedCli --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "isolated managed CLI --help exited $LASTEXITCODE" }
+
+          Write-Host "PASS hybrid-windows shared_files=$sharedFiles isolated_files=$isolatedFiles caller_uv_cache=absent"
