@@ -29,12 +29,28 @@ jobs:
           & git merge-base --is-ancestor $prHead HEAD
           if ($LASTEXITCODE -ne 0) { throw 'PR head is not an ancestor of the staging head' }
           & git diff --quiet $prHead -- `
-            install.ps1 `
-            install.sh `
             tests/sh/test_install_uv_cache_root.sh `
             tests/python/test_cross_platform_parity.py `
             tests/python/test_windows_python_venv_hardening.py
-          if ($LASTEXITCODE -ne 0) { throw 'Staging changed the PR product or regression tree' }
+          if ($LASTEXITCODE -ne 0) { throw 'Staging changed the PR regression tree' }
+
+          function Get-NormalizedFile([string]$path) {
+            return (Get-Content -LiteralPath $path -Raw).Replace("`r`n", "`n")
+          }
+          function Get-PrFile([string]$path) {
+            $lines = @(& git show "${prHead}:$path")
+            if ($LASTEXITCODE -ne 0) { throw "could not read $path from PR head" }
+            return (($lines -join "`n") + "`n")
+          }
+          foreach ($path in @('install.ps1', 'install.sh')) {
+            # Fresh upstream main changed only the unrelated release floor from
+            # 2026.9.1 to 2026.9.2 after this PR branched. Require the staged file
+            # to equal the PR file plus exactly that known one-line pin update.
+            $expected = (Get-PrFile $path).Replace('unsloth>=2026.9.1', 'unsloth>=2026.9.2')
+            if ((Get-NormalizedFile $path) -cne $expected) {
+              throw "staged $path differs beyond the verified upstream release-pin update"
+            }
+          }
           $source = Get-Content -LiteralPath install.ps1 -Raw
           foreach ($required in @(
             'Set-Item -LiteralPath Env:UV_CACHE_DIR -Value $PreviousValue',
