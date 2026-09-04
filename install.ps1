@@ -1225,6 +1225,28 @@ public static class UnslothStudioFinalPathV2
     }
     $VenvDir = Join-Path $StudioHome "unsloth_studio"
 
+    function Set-StudioUvCacheEnvironment {
+        param([Parameter(Mandatory = $true)][string]$StudioRoot)
+        if ([string]::IsNullOrWhiteSpace($env:UV_CACHE_DIR)) {
+            $env:UV_CACHE_DIR = Join-Path (Join-Path $StudioRoot "cache") "uv"
+        }
+    }
+
+    function Restore-StudioUvCacheEnvironment {
+        param(
+            [bool]$WasPresent,
+            [AllowNull()][string]$PreviousValue
+        )
+        # Use the PowerShell provider for both states. The .NET API maps an empty
+        # value to deletion on Windows and can leave the provider's view stale after
+        # deletion, so it cannot round-trip present-empty versus absent exactly.
+        if ($WasPresent) {
+            Set-Item -LiteralPath Env:UV_CACHE_DIR -Value $PreviousValue
+        } else {
+            Remove-Item -LiteralPath Env:UV_CACHE_DIR -ErrorAction SilentlyContinue
+        }
+    }
+
     $Rule = [string]::new([char]0x2500, 52)
     $Sloth = [char]::ConvertFromUtf32(0x1F9A5)
 
@@ -3119,7 +3141,10 @@ exit 0
     $studioNeedsRuntimeLock = $true
     $studioUsesLegacyLayout = ($StudioRedirectMode -ne 'env') -or $studioUsesTauriManagedRoot
     $studioAutoStartProcess = $null
+    $hadPreviousUvCacheDir = [Environment]::GetEnvironmentVariables().ContainsKey("UV_CACHE_DIR")
+    $previousUvCacheDir = [Environment]::GetEnvironmentVariable("UV_CACHE_DIR", "Process")
     try {
+        Set-StudioUvCacheEnvironment -StudioRoot $StudioHome
         if ($studioNeedsRuntimeLock) {
             try {
                 $studioRuntimeMutexNames = @(
@@ -6543,6 +6568,7 @@ sys.exit(2 if conflict else (0 if installed else 1))
         Write-StudioLine ""
     }
     } finally {
+        Restore-StudioUvCacheEnvironment -WasPresent $hadPreviousUvCacheDir -PreviousValue $previousUvCacheDir
         for ($i = $studioRuntimeMutexes.Count - 1; $i -ge 0; $i--) {
             Exit-StudioInstallMutex -Mutex $studioRuntimeMutexes[$i]
         }
