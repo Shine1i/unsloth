@@ -119,6 +119,7 @@ async def test_probe_separates_mcp_and_blender_readiness(monkeypatch):
     monkeypatch.setattr(service, "_bridge_version", bridge)
     monkeypatch.setattr(service, "list_tools_async", tools)
     from core.inference import mcp_client
+
     result = await service.probe(BlenderSettings())
     assert result.ok and result.tool_count == 1 and result.blender_ready is False
     assert result.blender_error
