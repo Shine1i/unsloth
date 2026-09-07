@@ -2037,13 +2037,15 @@ _AUTO_SAFE_WRAPPERS = frozenset(
 )
 
 # These read-named tools launch unsandboxed Blender on a caller-selected file.
-_BLENDER_CLI_SUMMARY_TOOLS = frozenset({
-    "get_blendfile_summary_datablocks_for_cli",
-    "get_blendfile_summary_missing_files_for_cli",
-    "get_blendfile_summary_of_linked_libraries_for_cli",
-    "get_blendfile_summary_path_info_for_cli",
-    "get_blendfile_summary_usage_guess_for_cli",
-})
+_BLENDER_CLI_SUMMARY_TOOLS = frozenset(
+    {
+        "get_blendfile_summary_datablocks_for_cli",
+        "get_blendfile_summary_missing_files_for_cli",
+        "get_blendfile_summary_of_linked_libraries_for_cli",
+        "get_blendfile_summary_path_info_for_cli",
+        "get_blendfile_summary_usage_guess_for_cli",
+    }
+)
 
 
 # MCP tools whose names look read-only auto-run; anything else asks.

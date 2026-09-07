@@ -10,10 +10,10 @@ from pathlib import Path
 
 def main() -> int:
     if sys.version_info < (3, 10):
-        print("Bundled Blender MCP requires Python 3.10 or newer.", file=sys.stderr)
+        print("Bundled Blender MCP requires Python 3.10 or newer.", file = sys.stderr)
         return 1
     if len(sys.argv) != 1:
-        print("The bundled Blender MCP launcher accepts no arguments.", file=sys.stderr)
+        print("The bundled Blender MCP launcher accepts no arguments.", file = sys.stderr)
         return 2
     vendor = Path(__file__).resolve().parents[2] / "vendor" / "blender_mcp" / "mcp"
     sys.path.insert(0, str(vendor))

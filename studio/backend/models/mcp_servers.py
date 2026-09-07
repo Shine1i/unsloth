@@ -63,7 +63,6 @@ class McpBuiltinResponse(BlenderSettings):
     min_blender_version: str
 
 
-
 class McpStdioDecodeRequest(BaseModel):
     url: StrictStr
 

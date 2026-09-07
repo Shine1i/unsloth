@@ -35,7 +35,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     for column in ("builtin_id", "builtin_config_json"):
         if column not in cols:
             conn.execute(f"ALTER TABLE mcp_servers ADD COLUMN {column} TEXT")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS mcp_servers_builtin_id ON mcp_servers(builtin_id)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS mcp_servers_builtin_id ON mcp_servers(builtin_id)"
+    )
 
 
 def get_connection() -> sqlite3.Connection:
@@ -149,6 +151,5 @@ def list_servers() -> list[dict]:
 def _effective_row(row: dict) -> dict:
     if row.get("builtin_id"):
         from integrations.blender.service import resolve_server
-
         return resolve_server(row)
     return row

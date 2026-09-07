@@ -19,6 +19,7 @@ def managed_policy(monkeypatch):
     monkeypatch.setattr(routes, "stdio_mcp_enabled", lambda: True)
     monkeypatch.setattr(service, "stdio_mcp_enabled", lambda: True)
     from core.inference.mcp_client import invalidate_tool_cache
+
     invalidate_tool_cache()
 
 
@@ -29,7 +30,14 @@ def test_catalog_is_opt_in_and_settings_are_typed(monkeypatch):
     assert item.server_id is None and not item.is_enabled and item.port == 9876
     assert db.list_servers() == []
     probe.assert_not_called()
-    for fields in ({"port": True}, {"port": "9876"}, {"port": 0}, {"port": 65536}, {"blender_path": "x\0y"}, {"command": "sh"}):
+    for fields in (
+        {"port": True},
+        {"port": "9876"},
+        {"port": 0},
+        {"port": 65536},
+        {"blender_path": "x\0y"},
+        {"command": "sh"},
+    ):
         with pytest.raises(ValidationError):
             BlenderSettings(**fields)
 
@@ -55,7 +63,11 @@ async def test_managed_enable_failure_retry_disable_and_portability(monkeypatch)
     probe.return_value = McpServerProbeResult(ok = True, tool_count = 3)
     enabled = await routes.setup_blender(BlenderSetup(is_enabled = True, port = 9877))
     assert enabled.server_id == row["id"] and enabled.is_enabled
-    for update in (McpServerUpdate(is_enabled = True), McpServerUpdate(url = "python"), McpServerUpdate(headers = {"X": "y"})):
+    for update in (
+        McpServerUpdate(is_enabled = True),
+        McpServerUpdate(url = "python"),
+        McpServerUpdate(headers = {"X": "y"}),
+    ):
         with pytest.raises(HTTPException):
             await routes.update_mcp_server(row["id"], update)
     with pytest.raises(HTTPException):
@@ -95,6 +107,7 @@ async def test_probe_separates_mcp_and_blender_readiness(monkeypatch):
     monkeypatch.setattr(service, "list_tools_async", tools)
     from core.inference import mcp_client
     from unittest.mock import Mock
+
     close = Mock()
     monkeypatch.setattr(mcp_client, "close_mcp_sessions", close)
     if hasattr(service, "close_mcp_sessions"):

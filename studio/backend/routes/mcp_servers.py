@@ -166,10 +166,17 @@ def _row_to_response(row: dict, *, include_headers: bool = True) -> McpServerRes
 
 
 def _blender_row():
-    return next((row for row in mcp_servers_db.list_servers() if row.get("builtin_id") == "blender"), None)
+    return next(
+        (row for row in mcp_servers_db.list_servers() if row.get("builtin_id") == "blender"), None
+    )
 
 
-def _require_managed_access(via_api_key, no_credential, *, executes = False):
+def _require_managed_access(
+    via_api_key,
+    no_credential,
+    *,
+    executes = False,
+):
     require_ui_session_for_local_commands(via_api_key or no_credential)
     if executes and not stdio_mcp_enabled():
         raise HTTPException(status_code = 400, detail = stdio_mcp_disabled_reason())
@@ -184,7 +191,9 @@ def list_builtins(
     if via_api_key or no_credential:
         item = blender.catalog_item()
         item.available = False
-        item.unavailable_reason = "An authenticated Studio UI session is required for bundled Blender MCP."
+        item.unavailable_reason = (
+            "An authenticated Studio UI session is required for bundled Blender MCP."
+        )
         return [item]
     return [blender.catalog_item(_blender_row())]
 
@@ -217,24 +226,36 @@ async def setup_blender(
     old = _blender_row()
     config = json.loads(old.get("builtin_config_json") or "{}") if old else {}
     if payload.is_enabled and not (config.get("consent") or payload.consent):
-        raise HTTPException(status_code = 400, detail = "Explicit consent is required before enabling Blender MCP.")
+        raise HTTPException(
+            status_code = 400, detail = "Explicit consent is required before enabling Blender MCP."
+        )
     settings = BlenderSettings(port = payload.port, blender_path = payload.blender_path)
     config = {**settings.model_dump(), "consent": bool(config.get("consent") or payload.consent)}
     server_id = old["id"] if old else uuid.uuid4().hex[:16]
     if old:
-        mcp_servers_db.update_server(server_id, {"builtin_config_json": json.dumps(config), "is_enabled": False})
+        mcp_servers_db.update_server(
+            server_id, {"builtin_config_json": json.dumps(config), "is_enabled": False}
+        )
     else:
-        mcp_servers_db.create_server(server_id, "Blender", "", is_enabled = False, builtin_id = "blender", builtin_config_json = json.dumps(config))
+        mcp_servers_db.create_server(
+            server_id,
+            "Blender",
+            "",
+            is_enabled = False,
+            builtin_id = "blender",
+            builtin_config_json = json.dumps(config),
+        )
     invalidate_tool_cache(server_id)
     if old:
         await asyncio.to_thread(close_mcp_sessions, old["url"], parse_server_headers(old))
     if payload.is_enabled:
-        result = await blender.probe(settings, check_bridge = False, on_tools = lambda tools: cache_tools(server_id, tools))
+        result = await blender.probe(
+            settings, check_bridge = False, on_tools = lambda tools: cache_tools(server_id, tools)
+        )
         if not result.ok:
             raise HTTPException(status_code = 400, detail = result.error)
         mcp_servers_db.update_server(server_id, {"is_enabled": True})
     return blender.catalog_item(mcp_servers_db.get_server(server_id))
-
 
 
 @router.post("/stdio/decode", response_model = McpStdioCommand)
@@ -360,7 +381,10 @@ async def update_mcp_server(
     if old.get("builtin_id"):
         _require_managed_access(via_api_key, no_credential)
         if payload.model_fields_set != {"is_enabled"} or payload.is_enabled is not False:
-            raise HTTPException(status_code = 400, detail = "Use the bundled integration setup to configure or enable this server.")
+            raise HTTPException(
+                status_code = 400,
+                detail = "Use the bundled integration setup to configure or enable this server.",
+            )
     if not changes:
         raise HTTPException(status_code = 400, detail = "No fields to update")
     # Both directions, so an API key can neither repoint an http row at a command
@@ -409,7 +433,9 @@ async def delete_mcp_server(server_id: str, current_subject: str = Depends(get_c
     if not old:
         raise HTTPException(status_code = 404, detail = "MCP server not found")
     if old.get("builtin_id"):
-        raise HTTPException(status_code = 400, detail = "Bundled integrations cannot be deleted; disable them instead.")
+        raise HTTPException(
+            status_code = 400, detail = "Bundled integrations cannot be deleted; disable them instead."
+        )
     if old.get("use_oauth"):
         await clear_oauth_tokens_async(old["url"])
     mcp_servers_db.delete_server(server_id)
@@ -427,7 +453,10 @@ async def refresh_mcp_server_tools(
     if not server:
         raise HTTPException(status_code = 404, detail = "MCP server not found")
     if server.get("builtin_id"):
-        raise HTTPException(status_code = 400, detail = "Use the bundled integration Test action to check Blender readiness.")
+        raise HTTPException(
+            status_code = 400,
+            detail = "Use the bundled integration Test action to check Blender readiness.",
+        )
     # Refresh uses the stored address.
     if is_stdio(server["url"]):
         require_ui_session_for_local_commands(via_api_key)

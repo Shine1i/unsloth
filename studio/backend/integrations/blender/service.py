@@ -25,15 +25,26 @@ def unavailable_reason():
 
 def settings_for(row):
     config = json.loads(row.get("builtin_config_json") or "{}") if row else {}
-    return BlenderSettings(port = config.get("port", 9876), blender_path = config.get("blender_path", ""))
+    return BlenderSettings(
+        port = config.get("port", 9876), blender_path = config.get("blender_path", "")
+    )
 
 
 def resolve_server(row: dict) -> dict:
     if row.get("builtin_id") != "blender":
         raise ValueError("Unknown bundled MCP integration")
     settings = settings_for(row)
-    env = {"BLENDER_MCP_HOST": "127.0.0.1", "BLENDER_MCP_PORT": str(settings.port), "BLENDER_PATH": settings.blender_path or "blender"}
-    return {**row, "url": join_stdio_command(launch_command()), "headers_json": json.dumps(env), "use_oauth": False}
+    env = {
+        "BLENDER_MCP_HOST": "127.0.0.1",
+        "BLENDER_MCP_PORT": str(settings.port),
+        "BLENDER_PATH": settings.blender_path or "blender",
+    }
+    return {
+        **row,
+        "url": join_stdio_command(launch_command()),
+        "headers_json": json.dumps(env),
+        "use_oauth": False,
+    }
 
 
 def catalog_item(row = None):
@@ -51,12 +62,21 @@ def catalog_item(row = None):
 async def _bridge_version(port):
     reader, writer = await asyncio.open_connection("127.0.0.1", port, limit = 16384)
     try:
-        request = {"type": "execute", "code": "import bpy\nresult = {'version': list(bpy.app.version)}", "strict_json": True}
+        request = {
+            "type": "execute",
+            "code": "import bpy\nresult = {'version': list(bpy.app.version)}",
+            "strict_json": True,
+        }
         writer.write((json.dumps(request) + "\0").encode())
         await writer.drain()
         response = json.loads((await reader.readuntil(b"\0"))[:-1])
         version = response.get("result", {}).get("version")
-        if response.get("status") != "ok" or not isinstance(version, list) or len(version) != 3 or any(type(v) is not int for v in version):
+        if (
+            response.get("status") != "ok"
+            or not isinstance(version, list)
+            or len(version) != 3
+            or any(type(v) is not int for v in version)
+        ):
             raise ValueError("Invalid Blender bridge version response")
         if tuple(version) < tuple(map(int, MIN_BLENDER_VERSION.split("."))):
             raise ValueError(f"Blender {MIN_BLENDER_VERSION} or newer is required")
@@ -65,16 +85,26 @@ async def _bridge_version(port):
         await writer.wait_closed()
 
 
-async def probe(settings: BlenderSettings, *, check_bridge: bool = True, on_tools = None) -> McpServerProbeResult:
+async def probe(
+    settings: BlenderSettings,
+    *,
+    check_bridge: bool = True,
+    on_tools = None,
+) -> McpServerProbeResult:
     reason = unavailable_reason()
     if reason:
         return McpServerProbeResult(ok = False, error = reason)
-    row = resolve_server({"builtin_id": "blender", "builtin_config_json": settings.model_dump_json()})
+    row = resolve_server(
+        {"builtin_id": "blender", "builtin_config_json": settings.model_dump_json()}
+    )
     env = json.loads(row["headers_json"])
     try:
         tools = await list_tools_async(row["url"], headers = env, timeout = 15)
     except Exception:
-        return McpServerProbeResult(ok = False, error = "Could not connect to bundled Blender MCP. Check the Studio backend installation and retry.")
+        return McpServerProbeResult(
+            ok = False,
+            error = "Could not connect to bundled Blender MCP. Check the Studio backend installation and retry.",
+        )
     result = McpServerProbeResult(ok = True, tool_count = len(tools))
     if check_bridge:
         try:
