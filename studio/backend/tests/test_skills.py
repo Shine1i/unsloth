@@ -35,6 +35,19 @@ def _write_skill(
     return root
 
 
+@pytest.fixture(autouse = True)
+def _reset_tool_request_budget():
+    # execute_tool sets these per call and never resets them, so a tight budget from the
+    # pagination test below must not leak into later tests on the same worker.
+    from core.inference import tools
+
+    context_token = tools._REQUEST_CONTEXT_TOKENS.set(tools._UNSET_CONTEXT_TOKENS)
+    budget_token = tools._REQUEST_RESULT_BUDGET.set(None)
+    yield
+    tools._REQUEST_CONTEXT_TOKENS.reset(context_token)
+    tools._REQUEST_RESULT_BUDGET.reset(budget_token)
+
+
 @pytest.fixture
 def isolated_skills(tmp_path, monkeypatch):
     home = tmp_path / "home"

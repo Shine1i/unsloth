@@ -29753,10 +29753,15 @@ async def anthropic_count_tokens(
                 payload.enabled_tools,
             )
         )
+        _count_full_access = bool(getattr(payload, "bypass_permissions", False))
+        if _count_full_access:
+            # Same schemas /messages renders under Full access, or the count prices a different prompt.
+            from core.inference.tools import apply_full_access_tool_descriptions
+            openai_tools = apply_full_access_tool_descriptions(openai_tools)
         _count_nudge = _build_tool_action_nudge(
             tools = openai_tools,
             model_name = _llama_public_model_id(llama_backend, payload.model),
-            full_access = bool(getattr(payload, "bypass_permissions", False)),
+            full_access = _count_full_access,
         )
         openai_messages = _append_to_system_message(openai_messages, _count_nudge)
 

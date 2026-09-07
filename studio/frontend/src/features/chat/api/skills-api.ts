@@ -74,6 +74,12 @@ export function listSkills(force = false): Promise<readonly SkillRecord[]> {
   const request = authFetch("/api/skills")
     .then((response) => parseResponse<SkillRecord[]>(response))
     .then((skills) => {
+      if (!Array.isArray(skills)) {
+        throw new Error("Could not load Agent Skills.");
+      }
+      return skills;
+    })
+    .then((skills) => {
       if (generation === requestGeneration) {
         publish({ skills, loading: false, initialized: true, error: null });
       }
