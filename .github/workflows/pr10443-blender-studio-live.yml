@@ -1,0 +1,137 @@
+name: "PR 10443 Blender MCP cross-OS live"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - pr-10443-mimir-pr10443-blender-live-20260907t1631z-ci
+    paths:
+      - '.github/workflows/pr10443-blender-studio-live.yml'
+      - '.github/scripts/pr10443_blender_live.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr10443-blender-studio-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  studio-live:
+    name: Studio live (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: ubuntu
+            port: 18943
+          - os: macos-14
+            label: macos-14
+            port: 18944
+          - os: windows-latest
+            label: windows
+            port: 18945
+    env:
+      EXPECTED_PR_HEAD: bcd9a8a25c9fe509c9220528c79bf4022a20410c
+      UNSLOTH_STUDIO_HOME: ${{ runner.temp }}/pr10443-studio-home
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence
+      STUDIO_PORT: ${{ matrix.port }}
+      UNSLOTH_STUDIO_ALLOW_STDIO_MCP: '1'
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assert exact PR product tree plus harness only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PR_HEAD"
+          git diff --quiet "$EXPECTED_PR_HEAD" -- . \
+            ':(exclude).github/workflows/pr10443-blender-studio-live.yml' \
+            ':(exclude).github/scripts/pr10443_blender_live.py'
+          echo "PASS: harness commit parent is exact PR head $EXPECTED_PR_HEAD and product tree is unchanged"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install tested branch (--local --no-torch, Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$UNSLOTH_STUDIO_HOME" logs
+          bash ./install.sh --local --no-torch 2>&1 | tee logs/install.log
+
+      - name: Prepare Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          npm install -g 'npm@^11'
+          New-Item -ItemType Directory -Force -Path $env:UNSLOTH_STUDIO_HOME, logs | Out-Null
+          foreach ($p in @(
+            $env:UNSLOTH_STUDIO_HOME,
+            "$env:GITHUB_WORKSPACE\studio\frontend\node_modules",
+            "$env:GITHUB_WORKSPACE\studio\frontend\dist"
+          )) {
+            try { Add-MpPreference -ExclusionPath $p -ErrorAction Stop } catch { }
+          }
+
+      - name: Install tested branch (--local --no-torch, Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $child = '$ErrorActionPreference = ''Stop''; $ProgressPreference = ''SilentlyContinue''; & ./install.ps1 --local --no-torch; exit $LASTEXITCODE'
+          pwsh -NoProfile -ExecutionPolicy Bypass -Command $child 2>&1 | Tee-Object -FilePath logs/install.log
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited with code $LASTEXITCODE" }
+
+      - name: Exercise live launch, auth, first-use download, MCP discovery, and persistence
+        shell: bash
+        run: python .github/scripts/pr10443_blender_live.py
+
+      - name: Audit sanitized artifact payload
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s evidence/result.json
+          test -s evidence/lifecycle.log
+          if grep -Eai 'authorization|access[_ -]?token|refresh[_ -]?token|bootstrap[_ -]?password|cookie|eyJ[A-Za-z0-9_-]{10,}' evidence/result.json evidence/lifecycle.log; then
+            echo '::error::credential-like material found in artifact payload'
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('evidence/result.json').read_text())
+          assert result['expected_pr_head'] == 'bcd9a8a25c9fe509c9220528c79bf4022a20410c'
+          assert result['tool_count'] > 0
+          assert result['blender_gui_installed'] is False
+          assert len(result['passes']) >= 9
+          print('PASS: artifact payload is sanitized and complete')
+          PY
+
+      - name: Upload sanitized lifecycle evidence
+        if: always() && hashFiles('evidence/result.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr10443-blender-live-${{ matrix.label }}
+          path: |
+            evidence/result.json
+            evidence/lifecycle.log
+          if-no-files-found: error
+          retention-days: 7
