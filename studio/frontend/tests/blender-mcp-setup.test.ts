@@ -7,14 +7,10 @@ import test from "node:test";
 
 const source = readFileSync(new URL("../src/features/chat/blender-mcp-setup.tsx", import.meta.url), "utf8");
 
-test("reopening enabled Blender uses backend state, not a fresh consent checkbox", () => {
-  assert.match(source, /config && !config\.is_enabled && \([\s\S]*?<Checkbox/);
-  assert.match(source, /config && !config\.is_enabled && \([\s\S]*?act\("enable"\)/);
-  assert.match(source, /disabled=\{locked \|\| !config\?\.available \|\| !validPort \|\| \(!config\.is_enabled && !consent\)\}[\s\S]*?act\("test"\)/);
-  assert.doesNotMatch(source, /localStorage/);
-});
-
-test("Blender installation opens the official site instead of fetching a ZIP", () => {
+test("Blender help uses official guides and generic server setup without a managed runtime", () => {
   assert.match(source, /openLink\("https:\/\/www\.blender\.org\/lab\/mcp-server\/"\)/);
-  assert.doesNotMatch(source, /downloadBlenderAddon|act\("download"\)/);
+  assert.match(source, /openLink\("https:\/\/projects\.blender\.org\/lab\/blender_mcp\/wiki\/Llama\.cpp"\)/);
+  assert.match(source, /http:\/\/127\.0\.0\.1:9191\//);
+  assert.match(source, /onClick=\{onAddServer\}/);
+  assert.doesNotMatch(source, /useEffect|useState|builtin|fetch\(|downloadBlenderAddon/i);
 });

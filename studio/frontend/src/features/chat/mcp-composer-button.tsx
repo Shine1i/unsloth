@@ -175,10 +175,8 @@ export function McpComposerButton({
   );
   // Non-preset servers, shown below the presets so they stay toggleable.
   const customServers = servers.filter(
-    (s) => !s.builtin_id && !PRESET_URLS.has(normalizeMcpUrl(s.url)),
+    (s) => !PRESET_URLS.has(normalizeMcpUrl(s.url)),
   );
-  const blender = servers.find((s) => s.builtin_id === "blender");
-
   const enabledCount = servers.filter((s) => s.is_enabled).length;
   const active = usable && mcpEnabledForChat && enabledCount > 0;
 
@@ -345,33 +343,6 @@ export function McpComposerButton({
               The loaded model cannot use MCP tools
             </DropdownMenuLabel>
           )}
-          <DropdownMenuItem
-            disabled={!serversLoaded || pendingUrls.has("builtin:blender")}
-            onSelect={(event) => {
-              if (!blender?.is_enabled) {
-                setMenuOpen(false);
-                setDialogOpen(true);
-                return;
-              }
-              event.preventDefault();
-              if (pendingUrlsRef.current.has("builtin:blender")) return;
-              pendingUrlsRef.current.add("builtin:blender");
-              setPendingUrls(new Set(pendingUrlsRef.current));
-              void updateMcpServer(blender.id, { isEnabled: false })
-                .then(applyServer)
-                .catch((error: unknown) => toast.error("Failed to disable Blender", {
-                  description: error instanceof Error ? error.message : String(error),
-                }))
-                .finally(() => {
-                  pendingUrlsRef.current.delete("builtin:blender");
-                  setPendingUrls(new Set(pendingUrlsRef.current));
-                });
-            }}
-          >
-            <span className="flex-1">Blender (Bundled)</span>
-            {blender?.is_enabled ? <HugeiconsIcon icon={Tick02Icon} size={16} /> : null}
-          </DropdownMenuItem>
-
           {MCP_PRESETS.map((preset) => {
             const norm = normalizeMcpUrl(preset.url);
             return renderRow({

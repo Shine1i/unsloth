@@ -1,56 +1,24 @@
 # MCP in Unsloth Studio
 
-## Bundled Blender integration
+## Connect Blender MCP
 
-Studio includes the official [Blender Lab MCP](https://projects.blender.org/lab/blender_mcp)
-server, **disabled by default**. With Python 3.10+, open **Manage MCP servers**,
-find **Blender**, read the execution warning and choose **Enable Blender MCP**.
-No commands, Git/uv installs or MCP downloads are needed. Enable MCP for the
-conversation and select a tool-capable model.
+Studio provides setup guidance, not a bundled Blender server or add-on.
 
-MCP connectivity and Blender readiness are separate: documentation tools work
-without Blender; interactive scene tools need Blender 5.1+ and its MCP add-on.
-Setup does not install or launch Blender or modify its preferences. Approved
-CLI tool calls can launch background Blender using the configured executable.
-Use **Test connection** to check the MCP server and interactive add-on bridge.
+1. Open **Manage MCP servers → Set up Blender MCP**. **Download Blender add-on**
+   opens [Blender's official MCP page](https://www.blender.org/lab/mcp-server/).
+2. In Blender, enable **Preferences → System → Network → Allow Online Access**.
+   Drag the website's install button into Blender twice: first to add the Blender
+   Lab repository, then to install MCP. After adding the repository, you can also
+   search **MCP** in **Get Extensions**.
+3. Follow the official [MCP server guide](https://projects.blender.org/lab/blender_mcp/wiki/Llama.cpp)
+   to install and start the server locally. Add its URL in Studio (the guide uses
+   `http://127.0.0.1:9191/`), test the connection and save the server.
+4. Enable MCP for the conversation and use a tool-capable model.
 
-### Connecting Blender (optional setup)
-
-1. In Blender, enable **Preferences → System → Network → Allow Online Access**.
-2. Click **Download Blender add-on** in Studio to open
-   [Blender's official MCP page](https://www.blender.org/lab/mcp-server/).
-3. Drag **Drag and Drop into Blender** into Blender twice: first to add the
-   Blender Lab repository, then to install MCP. Confirm **Install**.
-   After adding the repository, you can also search for **MCP** in **Get Extensions**.
-4. Enable the add-on, keep Blender open, then click **Test connection** in Studio.
-
-Use port `9876`, or configure the same port in both apps under advanced settings.
-
-The connection is `Studio → bundled stdio server → 127.0.0.1:9876 → Blender`.
-Port 9876 is a TCP bridge, **not an HTTP MCP URL**. No separate HTTP listener or
-`UNSLOTH_STUDIO_ENABLE_MCP` setting is needed for this integration.
-
-Blender must be reachable on the **Studio backend machine**, not merely the
-browser's machine. Docker, WSL and remote Studio installations may have a
-different loopback network; the managed integration does not expose or tunnel
-Blender's unauthenticated bridge. Local command execution must also be permitted
-by Studio's host policy and configured through an authenticated UI session.
-
-Blender tools can execute Python, modify scenes and write files with Blender's
-permissions. The add-on is not a security sandbox. Existing tool permissions
-still apply; cancellation cannot undo work already performed. Conversations
-share the target Blender scene. With an external model provider, tool results
-are sent to that provider.
-
-**Troubleshooting:** check Blender's version, Online Access, enabled MCP add-on,
-bridge start state and matching port. A running MCP subprocess alone does not
-mean Blender is ready. Disable the integration in Studio to stop using its
-tools; stop the bridge or disable the add-on in Blender to stop its listener.
-The conversation's MCP switch is separate from the saved server enable state.
-
-Bundled source revision, licenses and archive hashes are recorded in
-`backend/vendor/blender_mcp/NOTICE.md` and `PROVENANCE.json`. Install the add-on
-from Blender's official page; Studio bundles only the MCP server runtime.
+Keep Blender and its add-on running for scene tools. `localhost` refers to the
+Studio backend machine, not a remote browser; keep the server and bridge local.
+MCP tools can execute Blender Python and write files. Existing tool permissions
+apply, and external model providers receive tool results.
 
 ## Studio's own MCP server
 
