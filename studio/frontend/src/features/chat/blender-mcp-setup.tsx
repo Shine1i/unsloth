@@ -86,7 +86,7 @@ export function BlenderMcpSetup({ servers, disabled, onBusyChange }: {
     try {
       const settings = { port: Number(port), blender_path: blenderPath.trim() };
       if (action === "test") {
-        const result = await testBlenderMcp(settings);
+        const result = await testBlenderMcp({ ...settings, consent });
         if (!mounted.current) return;
         if (!result.ok) throw new Error(result.error ?? "MCP connection failed. Retry or check the Studio backend.");
         setConnection(result.blender_ready ? "ready" : "partial");

@@ -61,7 +61,7 @@ export function updateBlenderMcp(
   );
 }
 
-export function testBlenderMcp(payload: BlenderMcpSettings): Promise<McpServerProbeResult & {
+export function testBlenderMcp(payload: BlenderMcpSettings & { consent: boolean }): Promise<McpServerProbeResult & {
   blender_ready?: boolean;
   blender_error?: string | null;
 }> {

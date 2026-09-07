@@ -38,6 +38,7 @@ from core.inference.mcp_client import (
 )
 from core.inference.mcp_config_import import parse_mcp_config
 from models.mcp_servers import (
+    BlenderTest,
     McpServerCreate,
     McpServerImportRequest,
     McpServerImportResult,
@@ -191,9 +192,7 @@ def list_builtins(
     if via_api_key or no_credential:
         item = blender.catalog_item()
         item.available = False
-        item.unavailable_reason = (
-            "An authenticated Studio UI session is required for Blender MCP."
-        )
+        item.unavailable_reason = "An authenticated Studio UI session is required for Blender MCP."
         return [item]
     return [blender.catalog_item(_blender_row())]
 
@@ -201,17 +200,23 @@ def list_builtins(
 @router.post("/builtins/blender/test", response_model = McpServerProbeResult)
 @serialize_mcp_server_mutation
 async def test_blender(
-    payload: BlenderSettings,
+    payload: BlenderTest,
     current_subject: str = Depends(get_current_subject),
     via_api_key: ViaApiKey = False,
     no_credential: WithoutCredential = False,
 ):
     _require_managed_access(via_api_key, no_credential, executes = True)
     row = _blender_row()
+    config = json.loads(row.get("builtin_config_json") or "{}") if row else {}
+    if not (config.get("consent") or payload.consent):
+        raise HTTPException(
+            status_code = 400, detail = "Explicit consent is required before testing Blender MCP."
+        )
+    settings = BlenderSettings(port = payload.port, blender_path = payload.blender_path)
     on_tools = None
-    if row and blender.settings_for(row) == payload:
+    if row and blender.settings_for(row) == settings:
         on_tools = lambda tools: cache_tools(row["id"], tools)
-    return await blender.probe(payload, on_tools = on_tools)
+    return await blender.probe(settings, on_tools = on_tools)
 
 
 @router.put("/builtins/blender", response_model = McpBuiltinResponse)

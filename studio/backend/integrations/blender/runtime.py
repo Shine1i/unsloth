@@ -14,8 +14,13 @@ from utils.paths.storage_roots import cache_root
 REVISION = "4309a39646e644261624bfcd2bca669b343b7621"
 ARCHIVE_SHA256 = "acb68eb4beff27a84ba751931745e62f03ad51b7be50b3a924624153b6c38197"
 ARCHIVE_URL = f"https://projects.blender.org/api/v1/repos/lab/blender_mcp/archive/{REVISION}.tar.gz"
-_EXCLUDED = {"get_python_api_docs.py", "search_api_docs.py", "search_manual_docs.py",
-             "rst_doc_search.py", "rst_parse_docs.py"}
+_EXCLUDED = {
+    "get_python_api_docs.py",
+    "search_api_docs.py",
+    "search_manual_docs.py",
+    "rst_doc_search.py",
+    "rst_parse_docs.py",
+}
 
 
 def runtime_path() -> Path:
@@ -61,7 +66,12 @@ def _extract(data: bytes, target: Path) -> None:
     prompt = target / "blmcp/data/prompts.yml"
     text = prompt.read_text(encoding = "utf-8")
     start, end = text.index("  # Bundled Manuals"), text.index("  # Executing Code")
-    prompt.write_text(text[:start] + "  # Documentation\n\n  Offline documentation tools are not installed.\n\n" + text[end:], encoding = "utf-8")
+    prompt.write_text(
+        text[:start]
+        + "  # Documentation\n\n  Offline documentation tools are not installed.\n\n"
+        + text[end:],
+        encoding = "utf-8",
+    )
     if not (target / "blmcp/__init__.py").is_file():
         raise ValueError("Incomplete Blender MCP runtime")
 

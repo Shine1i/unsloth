@@ -48,6 +48,10 @@ class BlenderSettings(BaseModel):
     blender_path: StrictStr = Field(default = "", pattern = r"^[^\x00]*$")
 
 
+class BlenderTest(BlenderSettings):
+    consent: bool = Field(default = False, strict = True)
+
+
 class BlenderSetup(BlenderSettings):
     is_enabled: bool
     consent: bool = False

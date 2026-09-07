@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from integrations.blender import service
+from models.mcp_servers import BlenderTest
 from models.mcp_servers import BlenderSettings, BlenderSetup, McpServerProbeResult, McpServerUpdate
 from routes import mcp_servers as routes
 from storage import mcp_servers_db as db
@@ -97,6 +98,17 @@ async def test_managed_authorization_precedes_side_effects(monkeypatch):
         item = routes.list_builtins(**auth)[0]
         assert not item.available and item.server_id is None and item.port == 9876
     probe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_first_probe_requires_consent_before_setup(monkeypatch):
+    probe = AsyncMock(return_value = McpServerProbeResult(ok = True))
+    monkeypatch.setattr(service, "probe", probe)
+    with pytest.raises(HTTPException, match = "consent"):
+        await routes.test_blender(BlenderTest())
+    probe.assert_not_called()
+    await routes.test_blender(BlenderTest(consent = True))
+    probe.assert_awaited_once()
 
 
 @pytest.mark.asyncio

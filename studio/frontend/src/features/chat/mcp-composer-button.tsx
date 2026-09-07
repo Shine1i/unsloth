@@ -175,7 +175,7 @@ export function McpComposerButton({
   );
   // Non-preset servers, shown below the presets so they stay toggleable.
   const customServers = servers.filter(
-    (s) => !PRESET_URLS.has(normalizeMcpUrl(s.url)),
+    (s) => !s.builtin_id && !PRESET_URLS.has(normalizeMcpUrl(s.url)),
   );
   const enabledCount = servers.filter((s) => s.is_enabled).length;
   const active = usable && mcpEnabledForChat && enabledCount > 0;

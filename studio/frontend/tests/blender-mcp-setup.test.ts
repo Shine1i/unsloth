@@ -18,3 +18,8 @@ test("Blender installation opens the official site instead of fetching a ZIP", (
   assert.match(source, /openLink\("https:\/\/www\.blender\.org\/lab\/mcp-server\/"\)/);
   assert.doesNotMatch(source, /downloadBlenderAddon|act\("download"\)/);
 });
+
+test("managed servers are not routed through generic composer toggles", () => {
+  const composer = readFileSync(new URL("../src/features/chat/mcp-composer-button.tsx", import.meta.url), "utf8");
+  assert.match(composer, /const customServers = servers\.filter\([\s\S]*?!s\.builtin_id/);
+});

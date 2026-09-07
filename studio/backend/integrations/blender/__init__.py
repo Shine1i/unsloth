@@ -8,9 +8,14 @@ import sys
 from pathlib import Path
 
 from .runtime import runtime_path
+
 MIN_PYTHON_VERSION = (3, 10)
 MIN_BLENDER_VERSION = "5.1.0"
 
 
 def launch_command() -> list[str]:
-    return [sys.executable, str(Path(__file__).resolve().with_name("launcher.py")), str(runtime_path())]
+    return [
+        sys.executable,
+        str(Path(__file__).resolve().with_name("launcher.py")),
+        str(runtime_path()),
+    ]
