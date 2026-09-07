@@ -3,6 +3,7 @@
 
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -111,7 +112,8 @@ def test_invalid_skill_is_reported_without_hiding_valid_skills(
 
 
 @pytest.mark.skipif(
-    os.name == "nt", reason = "Surrogate-escaped POSIX filenames are unavailable on Windows"
+    os.name == "nt" or sys.platform == "darwin",
+    reason = "Windows has no surrogate-escaped filenames and APFS rejects non-UTF-8 names",
 )
 def test_non_utf8_directory_name_does_not_hide_valid_skills(isolated_skills):
     home, _ = isolated_skills
@@ -361,6 +363,16 @@ def test_read_skill_tool_registration_selection_and_prompt(isolated_skills, monk
     assert "- guided: Guide this task" in nudge
     assert "@skill-name" in nudge
     assert ":skill[...]" in nudge
+    # Codex and external-provider paths never carry the general tool nudge; they
+    # still need the catalog so an @mention can be followed.
+    narrow = inference_routes._build_tool_action_nudge(
+        tools = [*selected, tools_module.WEB_SEARCH_TOOL],
+        model_name = "test",
+        full_access_only = True,
+    )
+    assert "- guided: Guide this task" in narrow
+    assert inference_routes._TOOL_BASE_NUDGE not in narrow
+    assert "web_search" not in narrow
 
     skills.set_skill_enabled("guided", False, home = home)
     selected = asyncio.run(

@@ -4546,9 +4546,10 @@ def _build_tool_action_nudge(
     full_access: bool = False,
     full_access_only: bool = False,
 ) -> str:
-    """``full_access_only`` returns the Full access sentence alone, for a caller
-    that wants to state the environment without also introducing the general
-    tool guidance (and the date) to a path that has never carried it."""
+    """``full_access_only`` returns the Full access sentence and the Agent Skills
+    catalog alone, for a caller that wants to state the environment without also
+    introducing the general tool guidance (and the date) to a path that has never
+    carried it."""
     tool_names = {
         (tool.get("function") or {}).get("name")
         for tool in tools
@@ -4569,7 +4570,12 @@ def _build_tool_action_nudge(
     if not (has_web or has_code or has_artifact or has_research or has_skills):
         return ""
     if full_access_only:
-        return _full_access_tip(code_tools) if (full_access and has_code) else ""
+        tips = []
+        if full_access and has_code:
+            tips.append(_full_access_tip(code_tools))
+        if has_skills:
+            tips.append(_skill_tool_tip())
+        return " ".join(tip for tip in tips if tip)
     if not (has_web or has_code or has_artifact):
         tips = []
         if has_research:
@@ -20050,10 +20056,14 @@ async def _proxy_to_external_provider(
             tool_payloads = studio_tool_payloads
             # This path runs python/terminal locally too (disable_sandbox =
             # bypass_permissions), so it has the same false-isolation problem.
+            # Only the Full access sentence and the skill catalog are added: the
+            # path has never carried the general tool nudge, and widening it
+            # would change every non-Full-access Codex run as a side effect.
             _codex_nudge = _build_tool_action_nudge(
                 tools = studio_tool_payloads,
                 model_name = model,
                 full_access = bool(payload.bypass_permissions),
+                full_access_only = True,
             )
             chat_messages = _append_to_codex_instructions(chat_messages, _codex_nudge)
         chat_messages = _prepend_current_date_to_messages(
@@ -20360,10 +20370,14 @@ async def _proxy_to_external_provider(
         include_api_key = run_studio_tool_loop,
     )
     if run_studio_tool_loop:
+        # Full access disables the sandbox at execution time, so the schemas must
+        # say so too rather than describing a sandbox the model will not get. The
+        # skill catalog rides along; the general tool nudge stays off this path.
         _external_nudge = _build_tool_action_nudge(
             tools = external_studio_tools,
             model_name = model,
             full_access = bool(payload.bypass_permissions),
+            full_access_only = True,
         )
         if _external_nudge:
             chat_messages = _append_to_system_message(chat_messages, _external_nudge)

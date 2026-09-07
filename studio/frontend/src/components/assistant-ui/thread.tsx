@@ -273,6 +273,7 @@ import {
   useAui,
   useAuiEvent,
   useAuiState,
+  type TextMessagePartComponent,
 } from "@assistant-ui/react";
 import { flushResourcesSync } from "@assistant-ui/tap";
 import {
@@ -2369,8 +2370,15 @@ const Composer: FC<{
   // Thread on screen, so the guard can tell whether a write belongs to the
   // thread that sent. Kept in step by the effect alongside pasteDraftKeyRef.
   const draftKeyRef = useRef<string | null>(null);
+  // True while the @skill picker has a row to pick, so Enter selects it instead of sending.
+  const mentionConsumesEnterRef = useRef(false);
+  const setMentionConsumesEnter = useCallback((consumesEnter: boolean) => {
+    mentionConsumesEnterRef.current = consumesEnter;
+  }, []);
   const { inputProps, isComposing, isComposingRef } =
     useImeComposerInputHandlers({
+      submitOnEnter: true,
+      skipEnterRef: mentionConsumesEnterRef,
       onModEnter: queueOnModEnter,
       justSentRef,
       draftKeyRef,
@@ -4854,7 +4862,10 @@ const Composer: FC<{
   return (
     <PromptQueueContext.Provider value={queueContextValue}>
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
-      <SkillMentionPopover enabled={supportsTools} />
+      <SkillMentionPopover
+        enabled={supportsTools}
+        onConsumesEnterChange={setMentionConsumesEnter}
+      />
     <ComposerPrimitive.Root
       ref={attachComposer}
       // Out of find-in-page's reach: the draft itself lives in a textarea the index cannot read, so
@@ -4968,11 +4979,14 @@ const IME_STUCK_TIMEOUT_MS = 2500;
 
 function useImeComposerInputHandlers({
   submitOnEnter = false,
+  skipEnterRef,
   onModEnter,
   justSentRef,
   draftKeyRef,
 }: {
   submitOnEnter?: boolean;
+  /** Set while a composer popover will consume plain Enter itself. */
+  skipEnterRef?: RefObject<boolean>;
   /** Cmd/Ctrl+Enter without Shift, claimed before the plain-Enter submit. */
   onModEnter?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   // Guard armed by the last send or queue. See setComposerText below.
@@ -5133,7 +5147,12 @@ function useImeComposerInputHandlers({
         onModEnter(e);
         return;
       }
-      if (submitOnEnter && e.key === "Enter" && !e.shiftKey) {
+      if (
+        submitOnEnter &&
+        e.key === "Enter" &&
+        !e.shiftKey &&
+        !skipEnterRef?.current
+      ) {
         e.preventDefault();
         e.currentTarget.form?.requestSubmit();
       }
@@ -5143,6 +5162,7 @@ function useImeComposerInputHandlers({
       onModEnter,
       refreshStuckTimer,
       setCompositionState,
+      skipEnterRef,
       submitOnEnter,
     ],
   );
@@ -7127,6 +7147,10 @@ const ImageGenerationToolUIConfirmable = withToolConfirmation(
   ImageGenerationToolUI,
 );
 const RenderHtmlToolUIConfirmable = withToolConfirmation(RenderHtmlToolUI);
+// Read at render time, not module scope: the skill modules reach the chat barrel.
+const ReadSkillToolUIConfirmable = withToolConfirmation((props) => (
+  <ReadSkillToolUI {...props} />
+));
 const ToolFallbackConfirmable = withToolConfirmation(ToolFallback);
 
 /**
@@ -7148,7 +7172,7 @@ const ASSISTANT_PART_COMPONENTS = {
     by_name: {
       web_search: WebSearchToolUIConfirmable,
       search_knowledge_base: KnowledgeBaseToolUIConfirmable,
-      read_skill: ReadSkillToolUI,
+      read_skill: ReadSkillToolUIConfirmable,
       python: PythonToolUIConfirmable,
       terminal: TerminalToolUIConfirmable,
       code_execution: CodeExecutionToolUIConfirmable,
@@ -7159,7 +7183,10 @@ const ASSISTANT_PART_COMPONENTS = {
   },
 } as const;
 
-const USER_PART_COMPONENTS = { Text: DirectiveText } as const;
+const UserMessageText: TextMessagePartComponent = (props) => (
+  <DirectiveText {...props} />
+);
+const USER_PART_COMPONENTS = { Text: UserMessageText } as const;
 
 // Live in-place denoising canvas for DiffusionGemma: while generating, render the
 // latest per-step canvas snapshot in the bubble so the user watches the answer resolve

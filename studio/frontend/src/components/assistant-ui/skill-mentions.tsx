@@ -8,6 +8,7 @@ import type {
 } from "@assistant-ui/core";
 import {
   ComposerPrimitive,
+  MessagePartPrimitive,
   type TextMessagePartComponent,
   unstable_useMentionAdapter,
 } from "@assistant-ui/react";
@@ -17,6 +18,7 @@ import {
   type KeyboardEvent,
   type MutableRefObject,
   type ReactElement,
+  type ReactNode,
   type RefObject,
   useCallback,
   useEffect,
@@ -31,15 +33,16 @@ function enabled(records: readonly SkillRecord[]): readonly SkillRecord[] {
   );
 }
 
+const MENTION_PATTERN =
+  /:skill\[([^\]\n]{1,128})\](?:\{name=([^}\n]{1,128})\})?|(^|\s)@([a-z0-9][a-z0-9-]{0,127})/gim;
+
 const skillMentionFormatter: Unstable_DirectiveFormatter = {
   serialize: (item) => `@${item.label}`,
   parse(text) {
     const segments: Unstable_DirectiveSegment[] = [];
-    const pattern =
-      /:skill\[([^\]\n]{1,128})\](?:\{name=([^}\n]{1,128})\})?|(^|\s)@([a-z0-9][a-z0-9-]{0,127})/gim;
     let lastIndex = 0;
 
-    for (const match of text.matchAll(pattern)) {
+    for (const match of text.matchAll(MENTION_PATTERN)) {
       const whitespace = match[3] ?? "";
       const mentionStart = match.index + whitespace.length;
       if (mentionStart > lastIndex) {
@@ -84,9 +87,30 @@ function useHighlightedItemScroll(root: HTMLElement | null) {
   }, [root]);
 }
 
+// Mounted inside the results list, so it exists exactly while the popover is
+// open; reports whether Enter would pick a row rather than send the message.
+function MentionEnterSignal({
+  onChange,
+  active,
+}: {
+  onChange?: (consumesEnter: boolean) => void;
+  active: boolean;
+}): null {
+  useEffect(() => {
+    if (!onChange) return;
+    onChange(active);
+    return () => onChange(false);
+  }, [active, onChange]);
+  return null;
+}
+
 export function SkillMentionPopover({
   enabled: mentionsEnabled,
-}: { enabled: boolean }): ReactElement | null {
+  onConsumesEnterChange,
+}: {
+  enabled: boolean;
+  onConsumesEnterChange?: (consumesEnter: boolean) => void;
+}): ReactElement | null {
   const { skills } = useSkillsCatalog();
   const [listElement, setListElement] = useState<HTMLDivElement | null>(null);
   const available = mentionsEnabled ? enabled(skills) : [];
@@ -121,6 +145,10 @@ export function SkillMentionPopover({
       <ComposerPrimitive.Unstable_TriggerPopoverItems>
         {(results) => (
           <>
+            <MentionEnterSignal
+              onChange={onConsumesEnterChange}
+              active={results.length > 0}
+            />
             <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
               Agent Skills
             </div>
@@ -256,7 +284,7 @@ export function useTextareaSkillMentions({
         );
         return true;
       }
-      if (event.key === "Enter" || event.key === "Tab") {
+      if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
         event.preventDefault();
         insert(results[highlighted] ?? results[0]);
         return true;
@@ -316,19 +344,38 @@ export function useTextareaSkillMentions({
   return { update, onKeyDown, popover, close: () => setRange(null) };
 }
 
+// Same markup as assistant-ui's default Text part unless the message names a
+// known skill, so an ordinary user message renders exactly as it did before.
 export const DirectiveText: TextMessagePartComponent = ({ text }) => {
-  const segments = skillMentionFormatter.parse(text);
-  return (
-    <span className="whitespace-pre-wrap">
-      {segments.map((segment, index) =>
-        segment.kind === "text" ? (
-          <span key={index}>{segment.text}</span>
-        ) : (
-          <span key={index} className="font-medium text-primary">
-            @{segment.label}
-          </span>
-        ),
-      )}
-    </span>
+  const { skills } = useSkillsCatalog();
+  const known = useMemo(
+    () => new Set(skills.filter((skill) => skill.valid).map((skill) => skill.name)),
+    [skills],
   );
+  const parts: ReactNode[] = [];
+  let lastIndex = 0;
+  for (const match of text.matchAll(MENTION_PATTERN)) {
+    const name = match[2] ?? match[1] ?? match[4] ?? "";
+    if (!known.has(name)) continue;
+    const start = match.index + (match[3] ?? "").length;
+    parts.push(text.slice(lastIndex, start));
+    parts.push(
+      <span key={start} className="font-medium text-primary">
+        @{match[1] ?? match[4]}
+      </span>,
+    );
+    lastIndex = match.index + match[0].length;
+  }
+  if (parts.length === 0) {
+    return (
+      <p style={{ whiteSpace: "pre-line" }}>
+        <MessagePartPrimitive.Text />
+        <MessagePartPrimitive.InProgress>
+          <span style={{ fontFamily: "revert" }}> &#x25CF;</span>
+        </MessagePartPrimitive.InProgress>
+      </p>
+    );
+  }
+  parts.push(text.slice(lastIndex));
+  return <p style={{ whiteSpace: "pre-line" }}>{parts}</p>;
 };
