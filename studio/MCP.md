@@ -2,23 +2,30 @@
 
 ## Connect Blender MCP
 
-Studio provides setup guidance, not a bundled Blender server or add-on.
+Studio bundles the Blender MCP runtime, **disabled by default**. No server commands
+or downloads are needed. The Blender add-on is installed separately.
 
-1. Open **Manage MCP servers → Set up Blender MCP**. **Download Blender add-on**
-   opens [Blender's official MCP page](https://www.blender.org/lab/mcp-server/).
-2. In Blender, enable **Preferences → System → Network → Allow Online Access**.
+1. Open **Manage MCP servers → Blender**, approve the execution warning and choose
+   **Enable Blender MCP**. Use a tool-capable model with MCP enabled for the chat.
+2. Open **Setup help → Download Blender add-on** for
+   [Blender's official page](https://www.blender.org/lab/mcp-server/).
+3. In Blender 5.1+, enable **Preferences → System → Network → Allow Online Access**.
    Drag the website's install button into Blender twice: first to add the Blender
-   Lab repository, then to install MCP. After adding the repository, you can also
-   search **MCP** in **Get Extensions**.
-3. Follow the official [MCP server guide](https://projects.blender.org/lab/blender_mcp/wiki/Llama.cpp)
-   to install and start the server locally. Add its URL in Studio (the guide uses
-   `http://127.0.0.1:9191/`), test the connection and save the server.
-4. Enable MCP for the conversation and use a tool-capable model.
+   Lab repository, then to install MCP. Alternatively, search **MCP** in
+   **Get Extensions** after adding the repository.
+4. Enable and start the add-on bridge, keep Blender open, then **Test connection**.
 
-Keep Blender and its add-on running for scene tools. `localhost` refers to the
-Studio backend machine, not a remote browser; keep the server and bridge local.
-MCP tools can execute Blender Python and write files. Existing tool permissions
-apply, and external model providers receive tool results.
+A green dot means Blender is connected; amber means only the MCP server is connected.
+Setup help stays in the same Blender entry. Advanced settings configure the bridge
+port (default `9876`) and optional Blender executable. This port is not an HTTP URL.
+
+The bridge uses loopback on the **Studio backend machine**, not a remote browser.
+Studio does not install or launch Blender during setup. Approved tools can run
+Python, write files and launch background Blender. Existing tool permissions apply;
+external model providers receive tool results. Keep the unauthenticated bridge local.
+
+The runtime excludes the large API/manual reference corpus and its three offline
+documentation tools. Source and license details: `backend/vendor/blender_mcp/NOTICE.md`.
 
 ## Studio's own MCP server
 
