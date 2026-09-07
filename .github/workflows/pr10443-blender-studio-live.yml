@@ -47,6 +47,8 @@ jobs:
         with:
           persist-credentials: false
 
+          fetch-depth: 0
+
       - name: Assert exact PR product tree plus harness only
         shell: bash
         run: |
