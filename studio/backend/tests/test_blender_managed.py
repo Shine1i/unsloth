@@ -136,3 +136,28 @@ async def test_probe_separates_mcp_and_blender_readiness(monkeypatch):
     assert mcp_client.get_cached_tools(enabled.server_id) is None
     await routes.test_blender(BlenderSettings())
     assert mcp_client.get_cached_tools(enabled.server_id) == tools.return_value
+
+
+def test_long_blender_names_dispatch_with_approval(monkeypatch):
+    from core.inference import tools
+    from unittest.mock import Mock
+
+    db.create_server("0123456789abcdef", "Blender", "", builtin_id = "blender")
+    monkeypatch.setattr(tools, "stdio_mcp_enabled", lambda: True)
+    call = Mock(return_value = "ok")
+    monkeypatch.setattr(tools, "call_tool_sync", call)
+    names = sorted(tools._BLENDER_CLI_SUMMARY_TOOLS)
+    specs = tools._mcp_specs_for_server(db.list_servers()[0], [{"name": n} for n in names])
+    assert len(specs) == len(names)
+    for raw, spec in zip(names, specs):
+        name = spec["function"]["name"]
+        assert len(name) <= 64
+        assert tools.is_potentially_unsafe_tool_call(name, {})
+        assert tools.is_high_risk_tool_call(name, {})
+        tools.execute_tool(name, {})
+        assert call.call_args.kwargs["name"] == raw
+        assert call.call_args.kwargs["config_check"]()
+    db.update_server("0123456789abcdef", {"is_enabled": False})
+    call.reset_mock()
+    assert "disabled" in tools.execute_tool(specs[0]["function"]["name"], {})
+    call.assert_not_called()

@@ -148,6 +148,12 @@ def list_servers() -> list[dict]:
         conn.close()
 
 
+def get_server_for_tool(key: str) -> Optional[dict]:
+    if key == "blender":
+        return next((row for row in list_servers() if row.get("builtin_id") == key), None)
+    return get_server(key)
+
+
 def _effective_row(row: dict) -> dict:
     if row.get("builtin_id"):
         from integrations.blender.service import resolve_server

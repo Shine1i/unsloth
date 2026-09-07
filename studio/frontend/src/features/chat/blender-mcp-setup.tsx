@@ -34,6 +34,7 @@ export function BlenderMcpSetup({ servers, disabled, onBusyChange }: {
   const [connection, setConnection] = useState<"checking" | "ready" | "partial" | "failed" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const generation = useRef(0);
   const busyRef = useRef(false);
   const initialized = useRef(false);
@@ -47,13 +48,14 @@ export function BlenderMcpSetup({ servers, disabled, onBusyChange }: {
       const blender = rows.find((row) => row.builtin_id === "blender");
       if (!blender) throw new Error("Blender MCP is not available from this Studio backend.");
       setConfig(blender);
+      setLoadError(null);
       if (!initialized.current) {
         initialized.current = true;
         setPort(String(blender.port));
         setBlenderPath(blender.blender_path);
       }
     } catch (err) {
-      if (generation.current === current) setError(err instanceof Error ? err.message : String(err));
+      if (generation.current === current) setLoadError(err instanceof Error ? err.message : String(err));
     }
   }, []);
 
@@ -203,7 +205,7 @@ export function BlenderMcpSetup({ servers, disabled, onBusyChange }: {
       </Collapsible>
       {config?.unavailable_reason && <p className="text-xs text-muted-foreground">{config.unavailable_reason}</p>}
       {message && <p role="status" className="text-xs">{message}</p>}
-      {error && <div role="alert" className="text-xs text-destructive">{error}{!config && <Button size="sm" variant="ghost" onClick={() => void refresh()}>Retry</Button>}</div>}
+      {(error || loadError) && <div role="alert" className="text-xs text-destructive">{error || loadError}{loadError && <Button size="sm" variant="ghost" onClick={() => void refresh()}>Retry</Button>}</div>}
     </section>
   );
 }

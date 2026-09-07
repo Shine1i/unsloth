@@ -10255,7 +10255,8 @@ def _mcp_specs_for_server(server: dict, mcp_tools: list[dict]) -> list[dict]:
         if not _mcp_tool_model_visible(tool):
             logger.debug("Skipping app-only MCP tool '%s' on '%s'.", raw_name, display)
             continue
-        name = f"{MCP_TOOL_PREFIX}{server['id']}__{raw_name}"
+        server_key = "blender" if server.get("builtin_id") == "blender" else server["id"]
+        name = f"{MCP_TOOL_PREFIX}{server_key}__{raw_name}"
         # Bad chars or oversized names would 400 the whole request; skip + warn
         # so the rest of the tools still ship.
         if not _OPENAI_FN_NAME_RE.fullmatch(name):
@@ -10498,9 +10499,10 @@ def execute_tool(
             _, server_id, tool_name = name.split("__", 2)
         except ValueError:
             return f"Error: malformed MCP tool name '{name}'"
-        server = mcp_servers_db.get_server(server_id)
+        server = mcp_servers_db.get_server_for_tool(server_id)
         if not server:
             return f"Error: MCP server for tool '{tool_name}' not found"
+        server_id = server["id"]
         display = server.get("display_name") or server_id
         if not server.get("is_enabled"):
             return f"Error: MCP server '{display}' is disabled"
