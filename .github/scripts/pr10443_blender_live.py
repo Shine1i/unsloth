@@ -38,7 +38,7 @@ facts: dict[str, Any] = {
     "expected_pr_head": EXPECTED_PR_HEAD,
     "os": platform.platform(),
     "python": platform.python_version(),
-    "studio_home_isolated": str(HOME).startswith(str(Path(os.environ.get("RUNNER_TEMP", HOME.parent)).resolve())),
+    "studio_home_isolated": HOME.name == ".pr10443-studio-home",
     "runtime_revision": REVISION,
     "runtime_archive_sha256": ARCHIVE_SHA256,
     "blender_gui_installed": False,

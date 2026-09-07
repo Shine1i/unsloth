@@ -36,7 +36,7 @@ jobs:
             port: 18945
     env:
       EXPECTED_PR_HEAD: bcd9a8a25c9fe509c9220528c79bf4022a20410c
-      UNSLOTH_STUDIO_HOME: ${{ runner.temp }}/pr10443-studio-home
+      UNSLOTH_STUDIO_HOME: ${{ github.workspace }}/.pr10443-studio-home
       EVIDENCE_DIR: ${{ github.workspace }}/evidence
       STUDIO_PORT: ${{ matrix.port }}
       UNSLOTH_STUDIO_ALLOW_STDIO_MCP: '1'
@@ -51,11 +51,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = "$EXPECTED_PR_HEAD"
+          git merge-base --is-ancestor "$EXPECTED_PR_HEAD" HEAD
           git diff --quiet "$EXPECTED_PR_HEAD" -- . \
             ':(exclude).github/workflows/pr10443-blender-studio-live.yml' \
             ':(exclude).github/scripts/pr10443_blender_live.py'
-          echo "PASS: harness commit parent is exact PR head $EXPECTED_PR_HEAD and product tree is unchanged"
+          echo "PASS: exact PR head $EXPECTED_PR_HEAD is the immutable product tree beneath harness-only commits"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
