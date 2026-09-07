@@ -8,10 +8,11 @@ find **Blender**, read the execution warning and choose **Enable Blender MCP**.
 No commands, Git/uv installs or MCP downloads are needed. Enable MCP for the
 conversation and select a tool-capable model.
 
-MCP connectivity and Blender readiness are separate: the bundled documentation
-tools work without Blender, while scene tools require a running Blender 5.1+
-with its MCP add-on. Use **Test connection** to check both. Studio does not
-automatically install or launch Blender or modify its preferences.
+MCP connectivity and Blender readiness are separate: documentation tools work
+without Blender; interactive scene tools need Blender 5.1+ and its MCP add-on.
+Setup does not install or launch Blender or modify its preferences. Approved
+CLI tool calls can launch background Blender using the configured executable.
+Use **Test connection** to check the MCP server and interactive add-on bridge.
 
 ### Connecting Blender (optional setup)
 

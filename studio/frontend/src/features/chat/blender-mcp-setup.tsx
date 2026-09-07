@@ -148,7 +148,7 @@ export function BlenderMcpSetup({ servers, disabled, onBusyChange }: {
         <div className="flex items-start gap-3">
           <Checkbox id="blender-mcp-consent" className="mt-0.5" checked={consent} disabled={locked} onCheckedChange={(checked) => setConsent(checked === true)} />
           <Label htmlFor="blender-mcp-consent" className="text-xs font-normal leading-relaxed">
-            Allow unsandboxed Python and scene changes in connected Blender. Tool results may be sent to your model provider. Cancelling may not undo changes.
+            Allow unsandboxed Python, scene changes and background Blender tool processes. Results may be sent to your model provider. Cancelling may not undo changes.
           </Label>
         </div>
       )}
