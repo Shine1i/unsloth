@@ -2036,6 +2036,18 @@ _AUTO_SAFE_WRAPPERS = frozenset(
     }
 )
 
+# These read-named tools launch unsandboxed Blender on a caller-selected file.
+_BLENDER_CLI_SUMMARY_TOOLS = frozenset(
+    {
+        "get_blendfile_summary_datablocks_for_cli",
+        "get_blendfile_summary_missing_files_for_cli",
+        "get_blendfile_summary_of_linked_libraries_for_cli",
+        "get_blendfile_summary_path_info_for_cli",
+        "get_blendfile_summary_usage_guess_for_cli",
+    }
+)
+
+
 # MCP tools whose names look read-only auto-run; anything else asks.
 _AUTO_SAFE_MCP_TOOL_RE = re.compile(
     r"^(get|list|search|read|fetch|query|find|describe|show|view|lookup|"
@@ -4623,6 +4635,8 @@ def is_potentially_unsafe_tool_call(name: str, arguments: dict) -> bool:
         return _render_html_reaches_network(arguments)
     if name.startswith(MCP_TOOL_PREFIX):
         tool_name = name.split("__", 2)[-1]
+        if tool_name in _BLENDER_CLI_SUMMARY_TOOLS:
+            return True
         # A mutating verb anywhere (get_or_create_issue, read_and_delete)
         # overrides a read-only prefix.
         if _AUTO_UNSAFE_MCP_VERB_RE.search(tool_name):
@@ -6611,6 +6625,8 @@ def is_high_risk_tool_call(name: str, arguments: dict) -> bool:
         return _render_html_reaches_network(arguments)
     if name.startswith(MCP_TOOL_PREFIX):
         tool_name = name.split("__", 2)[-1]
+        if tool_name in _BLENDER_CLI_SUMMARY_TOOLS:
+            return True
         # Split camelCase into `_`-delimited terms so the term-boundary regexes
         # below match camelCase names too.
         tool_name = _CAMEL_CASE_RE.sub("_", tool_name)
