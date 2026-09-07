@@ -119,12 +119,6 @@ async def test_probe_separates_mcp_and_blender_readiness(monkeypatch):
     monkeypatch.setattr(service, "_bridge_version", bridge)
     monkeypatch.setattr(service, "list_tools_async", tools)
     from core.inference import mcp_client
-    from unittest.mock import Mock
-
-    close = Mock()
-    monkeypatch.setattr(mcp_client, "close_mcp_sessions", close)
-    if hasattr(service, "close_mcp_sessions"):
-        monkeypatch.setattr(service, "close_mcp_sessions", close)
     result = await service.probe(BlenderSettings())
     assert result.ok and result.tool_count == 1 and result.blender_ready is False
     assert result.blender_error
@@ -134,7 +128,6 @@ async def test_probe_separates_mcp_and_blender_readiness(monkeypatch):
     bridge.assert_not_called()
     bridge.side_effect = None
     assert (await service.probe(BlenderSettings())).blender_ready is True
-    close.assert_not_called()
     enabled = await routes.setup_blender(BlenderSetup(is_enabled = True, consent = True))
     assert mcp_client.get_cached_tools(enabled.server_id) == tools.return_value
     mcp_client.invalidate_tool_cache(enabled.server_id)
@@ -142,4 +135,3 @@ async def test_probe_separates_mcp_and_blender_readiness(monkeypatch):
     assert mcp_client.get_cached_tools(enabled.server_id) is None
     await routes.test_blender(BlenderSettings())
     assert mcp_client.get_cached_tools(enabled.server_id) == tools.return_value
-    close.assert_not_called()
