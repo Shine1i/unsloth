@@ -8,7 +8,6 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 import httpx
-from filelock import FileLock
 from utils.paths.storage_roots import cache_root
 
 REVISION = "4309a39646e644261624bfcd2bca669b343b7621"
@@ -77,6 +76,8 @@ def _extract(data: bytes, target: Path) -> None:
 
 
 def ensure_runtime() -> Path:
+    from filelock import FileLock
+
     target = runtime_path()
     target.parent.mkdir(parents = True, exist_ok = True)
     with FileLock(str(target) + ".lock", timeout = 120):
