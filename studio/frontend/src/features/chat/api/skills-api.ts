@@ -140,7 +140,9 @@ export async function setSkillEnabled(
   return updated;
 }
 
-const SKILL_MENTION_PATTERN = /(^|\s)@([a-z0-9][a-z0-9-]{0,127})/gi;
+// Both mention spellings the composer formatter parses: @name and the legacy :skill[label]{name=…}.
+const SKILL_MENTION_PATTERN =
+  /:skill\[([^\]\n]{1,128})\](?:\{name=([^}\n]{1,128})\})?|(^|\s)@([a-z0-9][a-z0-9-]{0,127})/gi;
 
 // Settle the catalog before a request decides tool enablement from it: finish any fetch
 // already in flight, and re-read the folders when the text names a skill the snapshot has
@@ -150,7 +152,8 @@ export async function settleSkillsForText(text: string): Promise<void> {
   const known = new Set(snapshot.skills.map((skill) => skill.name));
   let stale = !snapshot.initialized;
   for (const match of text.matchAll(SKILL_MENTION_PATTERN)) {
-    if (!known.has((match[2] ?? "").toLowerCase())) {
+    const name = match[2] ?? match[1] ?? match[4] ?? "";
+    if (!known.has(name.toLowerCase())) {
       stale = true;
       break;
     }
