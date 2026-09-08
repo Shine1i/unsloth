@@ -374,6 +374,7 @@ export {
 export { ChatSkillsDialog } from "./components/chat-skills-dialog";
 export {
   listSkills,
+  refreshSkillsCatalog,
   setSkillEnabled,
   useSkillsCatalog,
   type SkillRecord,

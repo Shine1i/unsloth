@@ -34,6 +34,7 @@ const EMPTY_SNAPSHOT: SkillsSnapshot = {
 };
 let snapshot = EMPTY_SNAPSHOT;
 let requestGeneration = 0;
+let lastFetchedAt = 0;
 let pending: Promise<readonly SkillRecord[]> | null = null;
 const listeners = new Set<() => void>();
 const channel =
@@ -81,12 +82,14 @@ export function listSkills(force = false): Promise<readonly SkillRecord[]> {
     })
     .then((skills) => {
       if (generation === requestGeneration) {
+        lastFetchedAt = Date.now();
         publish({ skills, loading: false, initialized: true, error: null });
       }
       return skills;
     })
     .catch((error: unknown) => {
       if (generation === requestGeneration) {
+        lastFetchedAt = Date.now();
         publish({
           ...snapshot,
           loading: false,
@@ -135,6 +138,14 @@ export async function setSkillEnabled(
     ({ refreshContextUsage }) => refreshContextUsage({ invalidate: true }),
   );
   return updated;
+}
+
+// Skills are files the user edits while Studio is open, so the places that surface the
+// catalog (the dialog, an @ mention) re-read it instead of trusting the page-load snapshot.
+// Throttled: a burst of @ keystrokes costs one request.
+export function refreshSkillsCatalog(maxAgeMs = 1500): void {
+  if (pending || Date.now() - lastFetchedAt < maxAgeMs) return;
+  void listSkills(true).catch(() => undefined);
 }
 
 export function useSkillsCatalog(): SkillsSnapshot {

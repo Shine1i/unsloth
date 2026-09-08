@@ -73,6 +73,7 @@ import {
   stripSearchImageTokens,
   useChatActive,
   useInComparePane,
+  refreshSkillsCatalog,
 } from "@/features/chat";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import {
@@ -2397,6 +2398,8 @@ const Composer: FC<{
       plainPasteAtRef.current = isPlainPasteChord(event)
         ? performance.now()
         : 0;
+      // A fresh @ re-reads the skill folders, so a skill written since page load is offered.
+      if (event.key === "@") refreshSkillsCatalog();
     },
     [],
   );

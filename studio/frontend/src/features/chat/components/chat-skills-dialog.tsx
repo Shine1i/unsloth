@@ -21,7 +21,7 @@ import { toast } from "@/lib/toast";
 import { BookOpen01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { RefreshCwIcon } from "lucide-react";
-import { type ReactElement, useState } from "react";
+import { type ReactElement, useEffect, useState } from "react";
 
 export function ChatSkillsDialog({
   open,
@@ -32,6 +32,10 @@ export function ChatSkillsDialog({
 }): ReactElement {
   const { skills, loading, error } = useSkillsCatalog();
   const [changing, setChanging] = useState<string | null>(null);
+  // Skills are added by writing files, so each open re-reads the folders.
+  useEffect(() => {
+    if (open) void listSkills(true).catch(() => undefined);
+  }, [open]);
 
   const toggle = async (name: string, enabled: boolean) => {
     setChanging(name);

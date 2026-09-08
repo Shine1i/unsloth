@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-import { type SkillRecord, useSkillsCatalog } from "@/features/chat";
+import {
+  type SkillRecord,
+  refreshSkillsCatalog,
+  useSkillsCatalog,
+} from "@/features/chat";
 import type {
   Unstable_DirectiveFormatter,
   Unstable_DirectiveSegment,
@@ -247,7 +251,10 @@ export function useTextareaSkillMentions({
         setRange(null);
         return;
       }
-      setRange(mentionAtCaret(nextText, caret));
+      const next = mentionAtCaret(nextText, caret);
+      // A fresh @ re-reads the folders, so a skill written since page load is offered.
+      if (next?.query === "") refreshSkillsCatalog();
+      setRange(next);
       setHighlighted(0);
     },
     [composingRef],
