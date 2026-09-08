@@ -33,7 +33,27 @@ import { fetchLoadExtraArgs } from "@/features/model-picker/api/model-overrides"
 import { sanitizeStoredExtraArgs } from "@/features/model-picker/model-config/llama-extra-args";
 import { usePlatformStore } from "@/config/env";
 
-import { getSkillsSnapshot, listSkills } from "./skills-api";
+import { getSkillsSnapshot, settleSkillsForText } from "./skills-api";
+
+function lastUserText(
+  messages: readonly { role?: string; content?: unknown }[],
+): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    const content = message.content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .map((part) =>
+        part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string"
+          ? (part as { text: string }).text
+          : "",
+      )
+      .join(" ");
+  }
+  return "";
+}
 import { projectHasSources } from "@/features/rag/api/rag-api";
 import {
   SANDBOX_FILE_TOOLS,
@@ -1860,10 +1880,7 @@ export async function buildLocalTokenCountExtras(
     : false;
   const ragOn = ragEnabled || projectRagEnabled;
 
-  const skillsSnapshot = getSkillsSnapshot();
-  if (!skillsSnapshot.initialized) {
-    await listSkills().catch(() => undefined);
-  }
+  await settleSkillsForText("");
   const hasEnabledSkills = getSkillsSnapshot().skills.some(
     (skill) => skill.valid && !skill.shadowed && skill.enabled,
   );
@@ -5729,12 +5746,8 @@ export function createOpenAIStreamAdapter(
         const buildRequestPayload = async (
           forceRefreshPublicKey = false,
         ): Promise<OpenAIChatCompletionsRequest> => {
-          const skillsSnapshot = getSkillsSnapshot();
-          if (
-            supportsStudioToolsForThisTurn &&
-            !skillsSnapshot.initialized
-          ) {
-            await listSkills().catch(() => undefined);
+          if (supportsStudioToolsForThisTurn) {
+            await settleSkillsForText(lastUserText(outboundMessages));
           }
           const hasEnabledSkills = getSkillsSnapshot().skills.some(
             (skill) => skill.valid && !skill.shadowed && skill.enabled,

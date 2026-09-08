@@ -140,6 +140,24 @@ export async function setSkillEnabled(
   return updated;
 }
 
+const SKILL_MENTION_PATTERN = /(^|\s)@([a-z0-9][a-z0-9-]{0,127})/gi;
+
+// Settle the catalog before a request decides tool enablement from it: finish any fetch
+// already in flight, and re-read the folders when the text names a skill the snapshot has
+// never seen (a pasted @mention gets no bare-@ keystroke to refresh on).
+export async function settleSkillsForText(text: string): Promise<void> {
+  if (pending) await pending.catch(() => undefined);
+  const known = new Set(snapshot.skills.map((skill) => skill.name));
+  let stale = !snapshot.initialized;
+  for (const match of text.matchAll(SKILL_MENTION_PATTERN)) {
+    if (!known.has((match[2] ?? "").toLowerCase())) {
+      stale = true;
+      break;
+    }
+  }
+  if (stale) await listSkills(true).catch(() => undefined);
+}
+
 // Skills are files the user edits while Studio is open, so the places that surface the
 // catalog (the dialog, an @ mention) re-read it instead of trusting the page-load snapshot.
 // Throttled: a burst of @ keystrokes costs one request.

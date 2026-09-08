@@ -80,13 +80,23 @@ def _studio_home_root(tmp_path_factory):
 _studio_home_counter = itertools.count()
 
 
+@pytest.fixture(scope = "session")
+def _skills_home_root(tmp_path_factory):
+    # One mktemp per session; see _studio_home_root for why a per-test mktemp is quadratic.
+    return tmp_path_factory.mktemp("skills_homes")
+
+
+_skills_home_counter = itertools.count()
+
+
 @pytest.fixture(autouse = True)
-def _isolate_agent_skills(tmp_path_factory, monkeypatch):
+def _isolate_agent_skills(_skills_home_root, monkeypatch):
     # Agent Skills discovery reads ~/.agents/skills and ~/.claude/skills. A developer with
     # skills installed otherwise gets extra read_skill tools in every tool-selection test.
     from core.inference import skills as _skills
 
-    home = tmp_path_factory.mktemp("skills-home")
+    home = _skills_home_root / f"h{next(_skills_home_counter)}"
+    home.mkdir()
     original_roots = _skills._skill_roots
     monkeypatch.setattr(
         _skills,

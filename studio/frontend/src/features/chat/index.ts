@@ -380,6 +380,7 @@ export {
   listSkills,
   refreshSkillsCatalog,
   setSkillEnabled,
+  settleSkillsForText,
   useSkillsCatalog,
   type SkillRecord,
 } from "./api/skills-api";
