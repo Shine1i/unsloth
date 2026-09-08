@@ -149,7 +149,13 @@ const SKILL_MENTION_PATTERN =
 // never seen (a pasted @mention gets no bare-@ keystroke to refresh on).
 export async function settleSkillsForText(text: string): Promise<void> {
   if (pending) await pending.catch(() => undefined);
-  const known = new Set(snapshot.skills.map((skill) => skill.name));
+  // Usable entries only: a mention of a skill the snapshot holds as invalid, shadowed or
+  // disabled re-reads too, since the file may have been repaired or re-enabled since.
+  const known = new Set(
+    snapshot.skills
+      .filter((skill) => skill.valid && !skill.shadowed && skill.enabled)
+      .map((skill) => skill.name),
+  );
   let stale = !snapshot.initialized;
   for (const match of text.matchAll(SKILL_MENTION_PATTERN)) {
     const name = match[2] ?? match[1] ?? match[4] ?? "";
