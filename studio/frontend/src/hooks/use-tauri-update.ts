@@ -94,7 +94,7 @@ export interface RetainedUpdateFailure {
 
 const DEFAULT_UPDATE_POLICY: DesktopUpdatePolicy = {
   mode: "in_app",
-  releasePageBaseUrl: "https://github.com/unslothai/unsloth/releases/tag/",
+  releasePageBaseUrl: "https://github.com/wasimysaid/unsloth/releases/tag/",
   releaseTagPrefix: "v",
 };
 const STARTUP_UPDATE_CHECK_DELAY_MS = 5000;

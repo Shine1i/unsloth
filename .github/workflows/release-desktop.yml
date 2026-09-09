@@ -95,7 +95,7 @@ jobs:
           import urllib.request
 
           RELEASES_API_URL = (
-              'https://api.github.com/repos/unslothai/unsloth/releases?per_page=30'
+              'https://api.github.com/repos/wasimysaid/unsloth/releases?per_page=30'
           )
 
           studio_version = os.environ['INPUT_STUDIO_VERSION'].strip()
@@ -331,7 +331,7 @@ jobs:
         shell: bash
         env:
           STUDIO_VERSION: ${{ steps.prepare.outputs.studio_version }}
-          PYPI_VERSION: ${{ steps.prepare.outputs.pypi_version }}
+          PYPI_VERSION: ${{ steps.backend.outputs.pypi_version }}
         run: |
           set -euo pipefail
           python3 <<'PY'
@@ -617,7 +617,7 @@ jobs:
           node <<'JS'
           const { readFileSync } = require('node:fs');
 
-          const expected = 'https://github.com/unslothai/unsloth/releases/latest/download/latest.json';
+          const expected = 'https://github.com/wasimysaid/unsloth/releases/latest/download/latest.json';
           const config = JSON.parse(readFileSync('studio/src-tauri/tauri.conf.json', 'utf8'));
           const endpoints = config.plugins?.updater?.endpoints;
           if (!Array.isArray(endpoints) || endpoints.length !== 1) {
