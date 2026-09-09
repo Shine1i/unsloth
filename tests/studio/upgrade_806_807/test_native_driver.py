@@ -19,7 +19,8 @@ class RelaunchIdentityTests(unittest.TestCase):
         self.driver.args = SimpleNamespace(app=Path("/release/Unsloth.AppImage"))
         self.driver.relaunch_at = 100.9  # Old predicate: incomparable wall-clock ordering.
         self.driver.pre_restart_pids = {100, 5298}
-        self.driver.wait = lambda probe, description: probe()
+        self.driver.wait = lambda probe, description, budget=None: probe()
+        self.driver.activation_confirmed = Mock(return_value=True)
         self.driver.health = Mock(return_value=True)
         self.driver.backend_version = Mock(return_value=native.NEW_BACKEND)
         self.driver.record = Mock()
@@ -65,6 +66,20 @@ class RelaunchIdentityTests(unittest.TestCase):
         other_app.terminate.assert_not_called()
         child.terminate.assert_not_called()
 
+    def test_unconfirmed_activation_never_terminates_replacement(self):
+        replacement = self.process(6104)
+        self.driver.activation_confirmed.return_value = False
+        def wait(probe, description, budget=None):
+            if not probe():
+                raise TimeoutError(description)
+            return True
+        self.driver.wait = wait
+        with self.assertRaises(TimeoutError):
+            self.reconnect([replacement])
+        replacement.terminate.assert_not_called()
+        self.driver.new_linux_session.assert_not_called()
+
+
     def test_wrong_activated_backend_prevents_any_termination(self):
         replacement = self.process(6104, created=101.0)
         self.driver.backend_version.return_value = native.OLD_BACKEND
@@ -72,6 +87,39 @@ class RelaunchIdentityTests(unittest.TestCase):
             self.reconnect([replacement])
         replacement.terminate.assert_not_called()
         self.driver.new_linux_session.assert_not_called()
+
+
+class ActivationConfirmationTests(unittest.TestCase):
+    def test_native_marker_states(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            home = Path(directory)
+            driver = object.__new__(native.Driver)
+            driver.args = SimpleNamespace(studio_home=home)
+            driver.backend_version = Mock(return_value=native.NEW_BACKEND)
+            previous = home / ".update-prev"
+            previous.mkdir()
+            (previous / "PENDING.json").write_text("{}")
+            self.assertFalse(driver.activation_confirmed())
+            marker = previous / "CONFIRMED.json"
+            marker.write_text(json.dumps({"backend_version": native.NEW_BACKEND,
+                                          "shell_version": native.NEW}))
+            self.assertTrue(driver.activation_confirmed())
+            marker.write_text(json.dumps({"backend_version": native.OLD_BACKEND,
+                                          "shell_version": native.NEW}))
+            self.assertFalse(driver.activation_confirmed())
+            marker.unlink()
+            (previous / "PENDING.json").unlink()
+            self.assertFalse(driver.activation_confirmed())  # cleanup not finished
+            previous.rmdir()
+            self.assertTrue(driver.activation_confirmed())
+            driver.backend_version.return_value = native.OLD_BACKEND
+            self.assertFalse(driver.activation_confirmed())
+            driver.backend_version.return_value = native.NEW_BACKEND
+            (home / ".update-failed.json").write_text("{}")
+            self.assertFalse(driver.activation_confirmed())
+
 
 
 class AttachmentDiagnosticsTests(unittest.TestCase):

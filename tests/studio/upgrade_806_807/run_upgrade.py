@@ -238,7 +238,8 @@ class Run:
         }, indent=2) + "\n")
 
     def upgrade(self):
-        script = HERE / ("mac_driver.py" if platform.system() == "Darwin" else "native_driver.py")
+        script = HERE / {"Darwin": "mac_driver.py", "Windows": "windows_ui_driver.py"}.get(
+            platform.system(), "native_driver.py")
         driver_artifacts = self.raw / "native-driver"
         driver_artifacts.mkdir(exist_ok=True)
         try:

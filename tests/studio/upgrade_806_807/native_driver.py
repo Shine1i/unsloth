@@ -347,6 +347,22 @@ class Driver:
         self.progress()
         self.record("staged-backend-and-signed-shell-ready")
 
+    def activation_confirmed(self):
+        # Read native-owned evidence only. Anonymous health can precede native
+        # version/ownership validation; killing then triggers rollback on reopen.
+        home = self.args.studio_home
+        previous = home / ".update-prev"
+        if (home / ".update-failed.json").exists():
+            return False
+        try:
+            versions = json.loads((previous / "CONFIRMED.json").read_text())
+        except FileNotFoundError:
+            # Native cleanup removes CONFIRMED last, then removes this directory.
+            return not previous.exists() and self.backend_version() == NEW_BACKEND
+        return (versions.get("backend_version") == NEW_BACKEND
+                and versions.get("shell_version") == NEW)
+
+
     def linux_reconnect(self):
         # WebKit's automation session is attached to the old PID. Native relaunch
         # starts a non-automated replacement; first prove that replacement brought
@@ -360,6 +376,9 @@ class Driver:
         self.record("relaunched-backend-metadata", backend=redact(actual_backend))
         if actual_backend != NEW_BACKEND:
             raise RuntimeError(f"Relaunch backend metadata mismatch: {actual_backend!r}")
+        self.wait(self.activation_confirmed,
+                  "native staged activation confirmation before verification reopen", 180)
+        self.record("native-activation-confirmed")
         matches = []
         candidates = []
         inspection_errors = {}
