@@ -193,7 +193,9 @@ class Run:
             bootstrap = ["bash", str(installer), "--tauri"]
         elif system == "Windows":
             self.command("install-806-app", [str(target), "/S"], timeout=300)
-            roots = [Path(os.environ["LOCALAPPDATA"]) / "Programs", Path(os.environ["LOCALAPPDATA"]) / "Unsloth"]
+            roots = [Path(os.environ["LOCALAPPDATA"]) / "Unsloth Studio (Desktop)",
+                     Path(os.environ["LOCALAPPDATA"]) / "Programs",
+                     Path(os.environ["LOCALAPPDATA"]) / "Unsloth"]
             candidates = [p for r in roots if r.exists() for p in r.rglob("install.ps1") if "unsloth" in str(p).lower()]
             if not candidates:
                 raise RuntimeError("Installed official app contains no install.ps1")
@@ -239,10 +241,12 @@ class Run:
         script = HERE / ("mac_driver.py" if platform.system() == "Darwin" else "native_driver.py")
         driver_artifacts = self.raw / "native-driver"
         driver_artifacts.mkdir(exist_ok=True)
-        self.command("native-806-to-807", [sys.executable, str(script), "--app", str(self.app),
-                     "--artifacts", str(driver_artifacts), "--studio-home", str(self.studio),
-                     "--timeout", "1800"], timeout=1900)
-        self.snapshot("after-upgrade")
+        try:
+            self.command("native-806-to-807", [sys.executable, str(script), "--app", str(self.app),
+                         "--artifacts", str(driver_artifacts), "--studio-home", str(self.studio),
+                         "--timeout", "1800"], timeout=1900)
+        finally:
+            self.snapshot("after-upgrade")
         assert self.packages().get("unsloth") == "2026.9.3", self.packages()
 
     def collect(self):
@@ -260,7 +264,7 @@ class Run:
                 if secret:
                     secrets.append(secret)
         for path in self.raw.rglob("*"):
-            if not path.is_file() or path.suffix not in (".log", ".txt", ".json"):
+            if not path.is_file() or path.suffix not in (".log", ".txt", ".json", ".jsonl"):
                 continue
             if path.name.startswith("cache-"):
                 continue

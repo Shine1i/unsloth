@@ -92,6 +92,13 @@ class Driver:
         self.events.write(json.dumps(record, ensure_ascii=True) + "\n")
         self.events.flush()
         print(f"[{record['at']}] {self.phase}: {event}", flush=True)
+        if event == "FAIL":
+            # Keep the exception in the primary captured log even if an artifact
+            # collector accidentally omits progress.jsonl. Never dump traceback
+            # locals, environments, auth responses, or process command lines.
+            detail = {key: redact(fields.get(key, ""))[:2000]
+                      for key in ("error_type", "error")}
+            print(json.dumps(detail, ensure_ascii=True), flush=True)
 
     def remaining(self):
         remaining = self.deadline - time.monotonic()
@@ -341,19 +348,39 @@ class Driver:
         # Backend807 is verified from managed metadata, never anonymous HTTP.
         import psutil
         self.wait(self.health, "backend healthy again after confirmed old-server stop")
-        if self.backend_version() != NEW_BACKEND:
-            raise RuntimeError("Relaunch did not activate managed backend2026.9.3")
+        self.record("relaunched-backend-healthy")
+        actual_backend = self.backend_version()
+        self.record("relaunched-backend-metadata", backend=redact(actual_backend))
+        if actual_backend != NEW_BACKEND:
+            raise RuntimeError(f"Relaunch backend metadata mismatch: {actual_backend!r}")
         matches = []
+        candidates = []
+        inspection_errors = {}
         for proc in psutil.process_iter(["pid", "name", "create_time"]):
             try:
-                if (proc.info["create_time"] >= self.relaunch_at
-                        and "unsloth" in proc.info["name"].lower()
-                        and Path(proc.environ().get("APPIMAGE", "/missing")).resolve() == self.args.app):
+                name_matches = "unsloth" in proc.info["name"].lower()
+                created_after = proc.info["create_time"] >= self.relaunch_at
+                if not name_matches and not created_after:
+                    continue
+                appimage = proc.environ().get("APPIMAGE")
+                path_matches = bool(appimage) and Path(appimage).resolve() == self.args.app
+                if name_matches or path_matches:
+                    # Only numeric/boolean identity facts, not environment values.
+                    candidates.append({"pid": proc.pid, "name_matches": name_matches,
+                                       "created_after_request": created_after,
+                                       "appimage_present": bool(appimage),
+                                       "appimage_matches": path_matches})
+                if created_after and name_matches and path_matches:
                     matches.append(proc)
-            except (psutil.Error, OSError):
-                continue
+            except (psutil.Error, OSError) as error:
+                kind = type(error).__name__
+                inspection_errors[kind] = inspection_errors.get(kind, 0) + 1
+        self.record("relaunch-process-inspection", candidates=candidates,
+                    inspection_errors=inspection_errors)
         if not matches:
-            raise RuntimeError("Cannot prove/identify the native relaunched AppImage process")
+            raise RuntimeError("Cannot prove/identify the native relaunched AppImage process; "
+                               + json.dumps({"candidates": candidates,
+                                             "inspection_errors": inspection_errors}))
         self.record("native-relaunch-observed", replacement_pids=[p.pid for p in matches])
         for proc in matches:
             proc.terminate()
