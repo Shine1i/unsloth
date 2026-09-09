@@ -115,9 +115,9 @@ class Driver:
                 if value:
                     return value
             except Exception as error:
-                last = type(error).__name__
+                last = f"{type(error).__name__}: {redact(error)[:1500]}"
             time.sleep(1)
-        raise TimeoutError(f"Timed out: {description}; last exception type={last}")
+        raise TimeoutError(f"Timed out: {description}; last exception={last}")
 
     def wd(self, method, path, payload=None):
         result = request(self.base + path, method, payload, min(30, self.remaining()))
@@ -159,8 +159,15 @@ class Driver:
         return self.finish(self.begin(expression))
 
     def attach_windows(self):
-        self.browser = self.playwright.chromium.connect_over_cdp(
-            self.base, timeout=min(10000, self.remaining()*1000))
+        # Distinguish a dead launch/single-instance exit from a live app whose
+        # release WebView2 cannot expose CDP. Never log process environment.
+        if self.phase == "launch-806" and self.process.poll() is not None:
+            raise RuntimeError(f"Release app exited before CDP attach: exit={self.process.returncode}")
+        try:
+            self.browser = self.playwright.chromium.connect_over_cdp(
+                self.base, timeout=min(10000, self.remaining()*1000))
+        except Exception as error:
+            raise RuntimeError("CDP discovery/connect failed: " + redact(error)[:1500]) from None
         for context in self.browser.contexts:
             for page in context.pages:
                 try:
@@ -356,21 +363,21 @@ class Driver:
         matches = []
         candidates = []
         inspection_errors = {}
-        for proc in psutil.process_iter(["pid", "name", "create_time"]):
+        for proc in psutil.process_iter(["pid", "name"]):
             try:
                 name_matches = "unsloth" in proc.info["name"].lower()
-                created_after = proc.info["create_time"] >= self.relaunch_at
-                if not name_matches and not created_after:
+                new_pid = proc.pid not in self.pre_restart_pids
+                if not name_matches and not new_pid:
                     continue
                 appimage = proc.environ().get("APPIMAGE")
                 path_matches = bool(appimage) and Path(appimage).resolve() == self.args.app
                 if name_matches or path_matches:
                     # Only numeric/boolean identity facts, not environment values.
                     candidates.append({"pid": proc.pid, "name_matches": name_matches,
-                                       "created_after_request": created_after,
+                                       "absent_before_restart": new_pid,
                                        "appimage_present": bool(appimage),
                                        "appimage_matches": path_matches})
-                if created_after and name_matches and path_matches:
+                if new_pid and name_matches and path_matches:
                     matches.append(proc)
             except (psutil.Error, OSError) as error:
                 kind = type(error).__name__
@@ -428,7 +435,14 @@ class Driver:
             self.record("install-returned")
             self.invoke("set_renderer_activity", {"kind": "shell_update", "active": False})
             self.invoke("mark_in_app_relaunch")
-            self.relaunch_at = time.time()
+            if os.name != "nt":
+                import psutil
+                # Snapshot before restart IPC. psutil create_time and time.time()
+                # need not agree at subsecond precision (run2 rejected both new
+                # AppImage PIDs). Existing PIDs, including same-PID exec, remain
+                # excluded: only a distinct matching shell proves this handoff.
+                self.pre_restart_pids = set(psutil.pids())
+                self.record("pre-restart-process-snapshot", count=len(self.pre_restart_pids))
             self.begin("window.__TAURI__.core.invoke('plugin:process|restart')")
             self.record("native-relaunch-requested")
         except Exception:
